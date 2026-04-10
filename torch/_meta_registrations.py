@@ -2686,6 +2686,10 @@ def meta_conv(
     output_padding: list[int],
     groups: int,
 ):
+    torch._check(
+        input_tensor.dtype == weight.dtype,
+        lambda: f"Input type ({input_tensor.dtype}) and weight type ({weight.dtype}) should be the same",
+    )
     shape_out = calc_conv_nd_return_shape(
         input_tensor,
         weight,
