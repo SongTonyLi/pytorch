@@ -13,25 +13,23 @@
 #include <torch/csrc/shim_common.h>
 #include <optional>
 
-#define AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(...)                    \
-  try {                                                                    \
-    __VA_ARGS__                                                            \
-  } catch (const c10::Error& e) {                                          \
-    torch_exception_what_with_backtrace = e.what();                        \
-    torch_exception_what = e.what_without_backtrace();                     \
-    return AOTI_TORCH_FAILURE;                                             \
-  } catch (const std::exception& e) {                                      \
-    const std::string exception_info =                                     \
-        std::string("Exception in aoti_torch: ") + e.what();               \
-    torch_exception_what_with_backtrace = exception_info;                  \
-    torch_exception_what = exception_info;                                 \
-    return AOTI_TORCH_FAILURE;                                             \
-  } catch (...) {                                                          \
-    const std::string exception_info = "Exception in aoti_torch: UNKNOWN"; \
-    torch_exception_what_with_backtrace = exception_info;                  \
-    torch_exception_what = exception_info;                                 \
-    return AOTI_TORCH_FAILURE;                                             \
-  }                                                                        \
+#define AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(...)                       \
+  try {                                                                       \
+    __VA_ARGS__                                                               \
+  } catch (const c10::Error& e) {                                             \
+    torch_exception_what_with_backtrace = e.what();                           \
+    torch_exception_what = e.what_without_backtrace();                        \
+    return AOTI_TORCH_FAILURE;                                                \
+  } catch (const std::exception& e) {                                         \
+    torch_exception_what_with_backtrace =                                     \
+        std::string("Exception in aoti_torch: ") + e.what();                  \
+    torch_exception_what = torch_exception_what_with_backtrace;               \
+    return AOTI_TORCH_FAILURE;                                                \
+  } catch (...) {                                                             \
+    torch_exception_what_with_backtrace = "Exception in aoti_torch: UNKNOWN"; \
+    torch_exception_what = torch_exception_what_with_backtrace;               \
+    return AOTI_TORCH_FAILURE;                                                \
+  }                                                                           \
   return AOTI_TORCH_SUCCESS;
 
 namespace torch::aot_inductor {
