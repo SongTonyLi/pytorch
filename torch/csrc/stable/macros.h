@@ -1,7 +1,7 @@
 #include <torch/csrc/stable/c/shim.h>
 
+#include <sstream>
 #include <stdexcept>
-#include <string>
 
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0
 
@@ -27,4 +27,16 @@
 // Users of this macro are expected to include cuda_runtime.h
 #define STD_CUDA_KERNEL_LAUNCH_CHECK() STD_CUDA_CHECK(cudaGetLastError())
 
-#endif
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0
+
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
+
+#define STABLE_TORCH_ERROR_CHECK(call)                                         \
+  if ((call) != TORCH_SUCCESS) {                                               \
+    std::stringstream ss;                                                      \
+    ss << call << " API call failed at " << __FILE__ << ", line " << __LINE__; \
+    ss << ", with: " << torch_exception_get_what();                            \
+    throw std::runtime_error(ss.str());                                        \
+  }
+
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
