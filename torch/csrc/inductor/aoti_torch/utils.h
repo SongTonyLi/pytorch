@@ -19,15 +19,24 @@
   } catch (const c10::Error& e) {                                        \
     torch_exception_what = e.what();                                     \
     torch_exception_what_without_backtrace = e.what_without_backtrace(); \
+    if (torch_exception_printing_enabled) {                              \
+      LOG(ERROR) << "Exception in aoti_torch: " << torch_exception_what; \
+    }                                                                    \
     return AOTI_TORCH_FAILURE;                                           \
   } catch (const std::exception& e) {                                    \
     torch_exception_what =                                               \
         std::string("Exception in aoti_torch: ") + e.what();             \
     torch_exception_what_without_backtrace = torch_exception_what;       \
+    if (torch_exception_printing_enabled) {                              \
+      LOG(ERROR) << torch_exception_what;                                \
+    }                                                                    \
     return AOTI_TORCH_FAILURE;                                           \
   } catch (...) {                                                        \
     torch_exception_what = "Exception in aoti_torch: UNKNOWN";           \
     torch_exception_what_without_backtrace = torch_exception_what;       \
+    if (torch_exception_printing_enabled) {                              \
+      LOG(ERROR) << torch_exception_what;                                \
+    }                                                                    \
     return AOTI_TORCH_FAILURE;                                           \
   }                                                                      \
   return AOTI_TORCH_SUCCESS;

@@ -222,6 +222,7 @@ AOTI_TORCH_EXPORT AOTITorchError torch_library_def_with_tags(
     int32_t num_tags);
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 
+// !!! TODO: THis must be 2.13, but it's test scaffolding is missing atm.
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 
 /// Retrieve a pointer to the string that holds the most recent exception's
@@ -235,6 +236,14 @@ AOTI_TORCH_EXPORT const char* torch_exception_get_what();
 /// message. This pointer is a borrowed pointer and is invalidated when the next
 /// exception occurs.
 AOTI_TORCH_EXPORT const char* torch_exception_get_what_without_backtrace();
+
+/// Configures whether the exception and its backtrace should be printed.
+/// The function returns the previously stored boolean value.
+AOTI_TORCH_EXPORT bool torch_exception_set_exception_printing(
+    bool should_print);
+
+/// Retrieves whether exception printing is enabled, without modifying it.
+AOTI_TORCH_EXPORT bool torch_exception_get_exception_printing();
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 
