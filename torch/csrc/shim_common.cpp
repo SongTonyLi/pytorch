@@ -742,12 +742,12 @@ AOTI_TORCH_EXPORT AOTITorchError torch_library_def_with_tags(
         torch::schema(schema), tag_vec, torch::_RegisterOrVerify::REGISTER);
   });
 thread_local std::string torch_exception_what;
-thread_local std::string torch_exception_what_with_backtrace;
+thread_local std::string torch_exception_what_without_backtrace;
 
-const char* torch_exception_get_what() {
+AOTI_TORCH_EXPORT const char* torch_exception_get_what() {
   return torch_exception_what.c_str();
 }
 
-const char* torch_exception_get_what_with_backtrace() {
-  return torch_exception_what_with_backtrace.c_str();
+AOTI_TORCH_EXPORT const char* torch_exception_get_what_without_backtrace() {
+  return torch_exception_what_without_backtrace.c_str();
 }

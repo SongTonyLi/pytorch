@@ -14,7 +14,7 @@ inline torch::stable::Tensor our_subtract_stable_error_check(
     const torch::stable::Tensor& other,
     double alpha = 1.0) {
   AtenTensorHandle ret0;
-  STABLE_TORCH_ERROR_CHECK(
+  STABLE_TORCH_ERROR_CODE_CHECK(
       aoti_torch_aten_subtract_Tensor(self.get(), other.get(), alpha, &ret0));
   return torch::stable::Tensor(ret0);
 }
@@ -22,19 +22,19 @@ inline torch::stable::Tensor our_subtract_stable_error_check(
 std::string my_exception_what() {
   return std::string(torch_exception_get_what());
 }
-std::string my_exception_get_what_with_backtrace() {
-  return std::string(torch_exception_get_what_with_backtrace());
+std::string my_exception_get_what_without_backtrace() {
+  return std::string(torch_exception_get_what_without_backtrace());
 }
 
 STABLE_TORCH_LIBRARY_FRAGMENT(STABLE_LIB_NAME, m) {
   m.def("our_subtract_stable_error_check(Tensor self, Tensor other, float alpha=1.0) -> Tensor");
   m.def("my_exception_what() -> str");
-  m.def("my_exception_get_what_with_backtrace() -> str");
+  m.def("my_exception_get_what_without_backtrace() -> str");
 
 }
 
 STABLE_TORCH_LIBRARY_IMPL(STABLE_LIB_NAME, CompositeExplicitAutograd, m) {
   m.impl("our_subtract_stable_error_check", TORCH_BOX(&our_subtract_stable_error_check));
   m.impl("my_exception_what", TORCH_BOX(&my_exception_what));
-  m.impl("my_exception_get_what_with_backtrace", TORCH_BOX(&my_exception_get_what_with_backtrace));
+  m.impl("my_exception_get_what_without_backtrace", TORCH_BOX(&my_exception_get_what_without_backtrace));
 }

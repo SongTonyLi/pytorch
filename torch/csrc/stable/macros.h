@@ -31,11 +31,14 @@
 
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 
-#define STABLE_TORCH_ERROR_CHECK(call)                                         \
+// This macro is similar to the header only macro TORCH_ERROR_CODE_CHECK, this
+// one does provide more information in the exception, including the error
+// message as retrieved through the c shims from the original error message.
+#define STABLE_TORCH_ERROR_CODE_CHECK(call)                                    \
   if ((call) != TORCH_SUCCESS) {                                               \
     std::stringstream ss;                                                      \
     ss << call << " API call failed at " << __FILE__ << ", line " << __LINE__; \
-    ss << ", with: " << torch_exception_get_what();                            \
+    ss << ", with: " << torch_exception_get_what_without_backtrace();          \
     throw std::runtime_error(ss.str());                                        \
   }
 

@@ -225,15 +225,16 @@ AOTI_TORCH_EXPORT AOTITorchError torch_library_def_with_tags(
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 
 /// Retrieve a pointer to the string that holds the most recent exception's
-/// message. This pointer is a borrowed pointer and is invalidated when the next
-/// exception occurs.
+/// message and backtrace. This pointer is a borrowed pointer and is invalidated
+/// when the next exception occurs. This may be the same as the less detailed
+/// torch_exception_get_what_without_backtrace() in case more information is not
+/// available.
 AOTI_TORCH_EXPORT const char* torch_exception_get_what();
 
 /// Retrieve a pointer to the string that holds the most recent exception's
-/// message and backtrace. This pointer is a borrowed pointer and is invalidated
-/// when the next exception occurs. This may be the same as the less detailed
-/// torch_exception_get_what() in case more information is not available.
-AOTI_TORCH_EXPORT const char* torch_exception_get_what_with_backtrace();
+/// message. This pointer is a borrowed pointer and is invalidated when the next
+/// exception occurs.
+AOTI_TORCH_EXPORT const char* torch_exception_get_what_without_backtrace();
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 

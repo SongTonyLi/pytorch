@@ -1966,10 +1966,12 @@ except RuntimeError as e:
         self.assertRaisesRegex(RuntimeError, expect_re, make_exception)
 
         # Retrieve the exception message directly.
-        self.assertEqual(libtorch_agnostic.ops.my_exception_what(), expect)
+        self.assertEqual(
+            libtorch_agnostic.ops.my_exception_get_what_without_backtrace(), expect
+        )
 
         # Verify the one with backtrace contains additional information.
-        with_backtrace = libtorch_agnostic.ops.my_exception_get_what_with_backtrace()
+        with_backtrace = libtorch_agnostic.ops.my_exception_what()
         self.assertTrue(with_backtrace.startswith(expect))
         self.assertTrue(
             with_backtrace.count("\n") > 10
