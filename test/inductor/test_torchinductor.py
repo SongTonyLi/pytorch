@@ -7605,6 +7605,9 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
                 c_fn(x)
 
     def test_convolution_errors_on_input_weight_dtype_mismatch(self):
+        if self.device != "cuda":
+            raise unittest.SkipTest("CUDA only")
+
         def fn(x):
             return torch.nn.functional.conv2d(x, weight, bias=None)
 
