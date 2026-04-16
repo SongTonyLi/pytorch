@@ -1346,14 +1346,6 @@ def conv(
     )
     input_ = new_kwargs["input"]
     weight = new_kwargs["weight"]
-    if (
-        func is aten.convolution.default
-        and input_.fake_device.type == "cuda"
-        and input_.dtype != weight.dtype
-    ):
-        raise RuntimeError(
-            f"Input type ({input_.dtype}) and weight type ({weight.dtype}) should be the same"
-        )
     device = input_.fake_device
     # need to re-enable mode so the tensors report fake device
     with fake_mode:

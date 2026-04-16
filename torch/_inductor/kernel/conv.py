@@ -555,6 +555,11 @@ def convolution(
             result, L[aten.view](bias, [result.get_size()[1]] + ndim * [1])
         )
 
+    if device_type == "cuda" and x.get_dtype() != weight.get_dtype():
+        raise RuntimeError(
+            f"Input type ({x.get_dtype()}) and weight type ({weight.get_dtype()}) should be the same"
+        )
+
     x.realize()
     weight.realize()
 
