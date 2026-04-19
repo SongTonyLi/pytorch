@@ -61,6 +61,7 @@ class TestLibtorchAgnostic(TestCase):
     - libtorch_agn_2_10: Extension built with TORCH_TARGET_VERSION=2.10.0
     - libtorch_agn_2_11: Extension built with TORCH_TARGET_VERSION=2.11.0
     - libtorch_agn_2_12: Extension built with TORCH_TARGET_VERSION=2.12.0
+    - libtorch_agn_2_13: Extension built with TORCH_TARGET_VERSION=2.13.0
 
     Tests should be decorated with @skipIfTorchVersionLessThan to indicate the
     version that they target.
@@ -114,7 +115,17 @@ class TestLibtorchAgnostic(TestCase):
                     extension_root=base_dir / "libtorch_agn_2_12_extension"
                 )
         else:
-            print(f"Skipping 2.12 extension (running on PyTorch {torch.__version__})")
+            print(f"Skipping 2.13 extension (running on PyTorch {torch.__version__})")
+
+        if (current_major > 2) or (current_major == 2 and current_minor >= 13):
+            try:
+                import libtorch_agn_2_13  # noqa: F401
+            except Exception:
+                install_cpp_extension(
+                    extension_root=base_dir / "libtorch_agn_2_13_extension"
+                )
+        else:
+            print(f"Skipping 2.13 extension (running on PyTorch {torch.__version__})")
 
     @onlyCPU
     def test_slow_sgd(self, device):
