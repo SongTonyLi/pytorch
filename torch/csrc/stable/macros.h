@@ -29,7 +29,7 @@
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0
 
-#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
 
 // This macro is similar to the header only macro TORCH_ERROR_CODE_CHECK, this
 // one does provide more information in the exception, including the error
@@ -48,4 +48,4 @@
     torch_exception_set_exception_printing(previous);                    \
   }
 
-#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0

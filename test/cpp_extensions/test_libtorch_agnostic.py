@@ -1947,10 +1947,10 @@ except RuntimeError as e:
         self.assertTrue(libtorch_agnostic.ops.my_layout(t_sparse_csr, torch.sparse_csr))
         self.assertFalse(libtorch_agnostic.ops.my_layout(t_sparse_csr, torch.strided))
 
-    @skipIfTorchVersionLessThan(2, 12)
+    @skipIfTorchVersionLessThan(2, 13)
     def test_my_exception_what(self, device):
         """Test exception what() handling."""
-        import libtorch_agn_2_12 as libtorch_agnostic
+        import libtorch_agn_2_13 as libtorch_agnostic
 
         # Verify that the default is to initialise with printing the backtrace
         self.assertTrue(

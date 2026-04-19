@@ -224,6 +224,7 @@ AOTI_TORCH_EXPORT AOTITorchError torch_library_def_with_tags(
 
 // !!! TODO: THis must be 2.13, but it's test scaffolding is missing atm.
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
 
 /// Retrieve a pointer to the string that holds the most recent exception's
 /// message and backtrace. This pointer is a borrowed pointer and is invalidated
@@ -245,7 +246,7 @@ AOTI_TORCH_EXPORT bool torch_exception_set_exception_printing(
 /// Retrieves whether exception printing is enabled, without modifying it.
 AOTI_TORCH_EXPORT bool torch_exception_get_exception_printing();
 
-#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
 
 #ifdef __cplusplus
 } // extern "C"
