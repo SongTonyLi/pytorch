@@ -47,7 +47,7 @@ class clean(distutils.command.clean.clean):
 def get_extension():
     extra_compile_args = {
         "cxx": [
-            "-DTORCH_TARGET_VERSION=0x020c000000000000",
+            "-DTORCH_TARGET_VERSION=0x020d000000000000",
             "-DSTABLE_LIB_NAME=libtorch_agn_2_13",
         ],
     }
