@@ -1,4 +1,5 @@
 #include <torch/csrc/stable/c/shim.h>
+#include <torch/headeronly/macros/Macros.h>
 
 #include <sstream>
 #include <stdexcept>
@@ -31,21 +32,36 @@
 
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
 
+HIDDEN_NAMESPACE_BEGIN(torch, stable, detail)
+[[maybe_unused]] C10_NOINLINE static void throw_exception(
+    const char* call,
+    const char* file,
+    int64_t line) {
+  std::stringstream ss;
+  ss << call << " API call failed at " << file << ", line " << line;
+  ss << ", with: " << torch_exception_get_what_without_backtrace();
+  throw std::runtime_error(ss.str());
+}
+HIDDEN_NAMESPACE_END(torch, stable, detail)
+
+// Worker function for the error check, its first argument is a unique variable
+// name that is used to store the previous printing state, we do this to ensure
+// that we don't accidentally shadow variables in the outer scope.
+#define STABLE_TORCH_ERROR_CODE_CHECK_IMPL(variable_name, call)               \
+  {                                                                           \
+    const bool variable_name = torch_exception_set_exception_printing(false); \
+    if ((call) != TORCH_SUCCESS) {                                            \
+      torch_exception_set_exception_printing(variable_name);                  \
+      torch::stable::detail::throw_exception(#call, __FILE__, __LINE__);      \
+    }                                                                         \
+    torch_exception_set_exception_printing(variable_name);                    \
+  }
+
 // This macro is similar to the header only macro TORCH_ERROR_CODE_CHECK, this
 // one does provide more information in the exception, including the error
 // message as retrieved through the c shims from the original error message.
-#define STABLE_TORCH_ERROR_CODE_CHECK(call)                              \
-  {                                                                      \
-    const bool previous = torch_exception_set_exception_printing(false); \
-    if ((call) != TORCH_SUCCESS) {                                       \
-      std::stringstream ss;                                              \
-      ss << call << " API call failed at " << __FILE__ << ", line "      \
-         << __LINE__;                                                    \
-      ss << ", with: " << torch_exception_get_what_without_backtrace();  \
-      torch_exception_set_exception_printing(previous);                  \
-      throw std::runtime_error(ss.str());                                \
-    }                                                                    \
-    torch_exception_set_exception_printing(previous);                    \
-  }
+#define STABLE_TORCH_ERROR_CODE_CHECK(call) \
+  STABLE_TORCH_ERROR_CODE_CHECK_IMPL(       \
+      C10_ANONYMOUS_VARIABLE(previous_exception_printing), call)
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0

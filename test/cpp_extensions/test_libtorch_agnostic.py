@@ -1964,7 +1964,20 @@ except RuntimeError as e:
         # Verify that the provided two tensors should error if subtracted.
         self.assertRaises(RuntimeError, lambda: torch.subtract(a, b))
 
-        def make_exception():
+        # Function to generate an exception that uses TORCH_ERROR_CHECK internally.
+        def make_exception_torch():
+            libtorch_agnostic.ops.our_subtract_torch_error_check(a, b)
+
+        # Regex to match the simple error.
+        expect_re = (
+            "aoti_torch_aten_subtract_Tensor\\(self.get\\(\\), other.get\\(\\), alpha, &ret0\\) API call"
+            " failed at .+?, line \\d+$"
+        )
+        # Verify that an operation using TORCH_ERROR_CHECK provides simple errors.
+        self.assertRaisesRegex(RuntimeError, expect_re, make_exception_torch)
+
+        # Function that generates an exception that uses STABLE_TORCH_ERROR_CODE_CHECK internally.
+        def make_exception_stable():
             libtorch_agnostic.ops.our_subtract_stable_error_check(a, b)
 
         # This is the actual string we'll expect.
@@ -1979,7 +1992,7 @@ except RuntimeError as e:
             "tensor b \\(\\d\\) at non-singleton dimension \\d$"
         )
         # Verify that an operation using STABLE_TORCH_ERROR_CHECK provides detailed errors.
-        self.assertRaisesRegex(RuntimeError, expect_re, make_exception)
+        self.assertRaisesRegex(RuntimeError, expect_re, make_exception_stable)
 
         # Retrieve the exception message directly.
         self.assertEqual(
