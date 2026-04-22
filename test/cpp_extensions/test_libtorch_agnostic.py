@@ -115,7 +115,7 @@ class TestLibtorchAgnostic(TestCase):
                     extension_root=base_dir / "libtorch_agn_2_12_extension"
                 )
         else:
-            print(f"Skipping 2.13 extension (running on PyTorch {torch.__version__})")
+            print(f"Skipping 2.12 extension (running on PyTorch {torch.__version__})")
 
         if (current_major > 2) or (current_major == 2 and current_minor >= 13):
             try:
