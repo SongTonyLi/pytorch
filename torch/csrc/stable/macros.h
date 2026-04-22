@@ -58,9 +58,9 @@ HIDDEN_NAMESPACE_END(torch, stable, detail)
   }
 
 // This macro is similar to the header-only macro TORCH_ERROR_CODE_CHECK, but
-// this macro is NOT header-only! It depends on the stable ABI but provides more info
-// in the exception, including the error message as retrieved through the c shims from
-// the original error message.
+// this macro is NOT header-only! It depends on the stable ABI but provides more
+// info in the exception, including the error message as retrieved through the c
+// shims from the original error message.
 #define STABLE_TORCH_ERROR_CODE_CHECK(call) \
   STABLE_TORCH_ERROR_CODE_CHECK_IMPL(       \
       C10_ANONYMOUS_VARIABLE(previous_exception_printing), call)
