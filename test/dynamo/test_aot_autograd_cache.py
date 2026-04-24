@@ -3165,6 +3165,30 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
             )
         compile_fx.compile_fx(gm, [[fake_x, fake_y]])
 
+    @requires_triton()
+    @inductor_config.patch("fx_graph_remote_cache", False)
+    @inductor_config.patch("fx_graph_cache", True)
+    @functorch_config.patch({"enable_autograd_cache": True})
+    @functorch_config.patch({"strict_autograd_cache": True})
+    @functorch_config.patch({"bundled_autograd_cache": True})
+    def test_triton_launcher_pickle_bypass_e2e(self):
+        """End-to-end: bundled autograd cache + strict mode + CUDA triton kernel.
+
+        Without the fix, exec'd launchers in _triton_bundle survive into
+        pickle and crash the compile under strict_autograd_cache.
+        """
+
+        def fn(x, y):
+            return x + y
+
+        a = torch.rand(25, device=GPU_TYPE)
+        b = torch.rand(25, device=GPU_TYPE)
+
+        compiled_fn = torch.compile(fn, backend="inductor")
+        with torch.no_grad():
+            result = compiled_fn(a, b)
+        self.assertEqual(fn(a, b), result)
+
 
 @functorch_config.patch({"bundled_autograd_cache": True})
 class AOTAutogradCacheBundledTests(AOTAutogradCacheTests):
@@ -3556,6 +3580,98 @@ class AOTAutogradCachePicklerTests(torch._dynamo.test_case.TestCase):
             r"AOTAutogradCachePicklerTests.test_pickle_entry_strict_mode_raises.<locals>.<lambda>",
         ):
             AOTAutogradCache._pickle_entry(entry, remote=False)
+
+    @requires_cuda_and_triton
+    @functorch_config.patch("strict_autograd_cache", True)
+    def test_save_bypasses_triton_launcher_pickle_error(self):
+        """Real CachingAutotuner with exec'd launcher that can't be pickled.
+        Reproduces https://github.com/vllm-project/vllm/pull/40077.
+        """
+        from torch._inductor.runtime.hints import (
+            AttrsDescriptorWrapper,
+            DeviceProperties,
+            HeuristicType,
+        )
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+        from torch._inductor.utils import triton_version_uses_attrs_dict
+
+        meta = {
+            "signature": {
+                "in_ptr0": "*fp32",
+                "out_ptr0": "*fp32",
+                "xnumel": "i32",
+            },
+            "device": DeviceProperties.create(torch.device(GPU_TYPE)),
+            "configs": [AttrsDescriptorWrapper(divisible_by_16=(0, 1), equal_to_1=())],
+            "constants": {},
+        }
+        if triton_version_uses_attrs_dict():
+            meta["signature"]["XBLOCK"] = "constexpr"
+
+        @triton.jit
+        def _add_kernel(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offsets = pid * XBLOCK + tl.arange(0, XBLOCK)
+            mask = offsets < xnumel
+            x = tl.load(in_ptr0 + offsets, mask=mask)
+            tl.store(out_ptr0 + offsets, x + 1.0, mask=mask)
+
+        autotuner = CachingAutotuner(
+            fn=_add_kernel,
+            triton_meta=meta,
+            configs=[triton.Config({"XBLOCK": 128})],
+            save_cache_hook=False,
+            mutated_arg_names=[],
+            optimize_mem=True,
+            heuristic_type=HeuristicType.POINTWISE,
+            inductor_meta={"grid_type": "Grid1D"},
+        )
+
+        xnumel = 256
+        inp = torch.randn(xnumel, device=GPU_TYPE)
+        out = torch.empty_like(inp)
+        stream = torch.cuda.current_stream().cuda_stream
+        autotuner.run(inp, out, xnumel, stream=stream)
+        self.assertEqual(out, inp + 1.0)
+
+        self.assertTrue(len(autotuner.launchers) > 0)
+        with self.assertRaisesRegex(
+            pickle.PicklingError,
+            r"Can't pickle.*launcher.*__main__",
+        ):
+            pickle.dumps(autotuner.launchers[0])
+
+        # Simulate the real leak: prepare_for_pickle clears launchers and
+        # other unpicklable fields, but restore the launcher to match the
+        # condition where it survives through compile_results.
+        launcher_fn = autotuner.launchers[0]
+        autotuner.prepare_for_pickle()
+        autotuner.launchers = [launcher_fn]
+
+        entry = _MockEntryForPickleTest(
+            picklable_field="test",
+            unpicklable_field=autotuner,
+        )
+
+        counters.clear()
+
+        # Patch out __getstate__'s assertion so pickle reaches the launcher
+        # and raises PicklingError (not AssertionError).
+        def getstate_without_assert(self):
+            return {**self.__dict__, "lock": None}
+
+        with (
+            patch.object(CachingAutotuner, "__getstate__", getstate_without_assert),
+            self.assertLogs(
+                "torch._functorch._aot_autograd.autograd_cache", level="INFO"
+            ) as log_context,
+        ):
+            AOTAutogradCache.save("test_key", entry, remote=False)  # type: ignore[arg-type]
+
+        self.assertEqual(counters["aot_autograd"]["autograd_cache_bypass"], 1)
+        self.assertTrue(
+            any("triton launcher" in msg for msg in log_context.output),
+        )
 
     def test_nested_tensor_subclass_cache_key(self):
         ctx = multiprocessing.get_context("spawn")

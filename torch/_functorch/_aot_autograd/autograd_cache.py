@@ -1295,6 +1295,15 @@ class AOTAutogradCache(GuardedCache[GenericAOTAutogradResult[Any, Any]]):
         except BypassAOTAutogradCache as e:
             AOTAutogradCache._handle_save_error(e, remote, is_bypass=True)
             return None
+        except pickle.PicklingError as e:
+            if "launcher" in str(e) and "__main__" in str(e):
+                # Triton's exec'd launcher functions are intentionally
+                # non-picklable. This is a cache miss, not a real error.
+                counters["aot_autograd"]["autograd_cache_bypass"] += 1
+                log.info("Bypassing autograd cache due to triton launcher: %s", e)
+                return None
+            AOTAutogradCache._handle_save_error(e, remote, is_bypass=False)
+            return None
         except Exception as e:
             AOTAutogradCache._handle_save_error(e, remote, is_bypass=False)
             return None

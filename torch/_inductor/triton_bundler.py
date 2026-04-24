@@ -189,6 +189,9 @@ class TritonBundler:
             new_kernel = copy.deepcopy(kernel)
             new_kernel.prepare_for_caching()
             new_kernel._reload_kernel = None
+            # Triton 3.7 CompiledKernel back-refs can leak exec'd launchers
+            # through deepcopy; safe to clear since _make_launchers rebuilds.
+            new_kernel.launchers = []
 
             entries.append(
                 StaticallyLaunchedAutotuner(
