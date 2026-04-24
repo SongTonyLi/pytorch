@@ -61,6 +61,101 @@ def _get_no_split_threshold() -> int:
     return 8192
 
 
+def _fails_tma_check(
+    view_size: tuple[int, ...],
+    strides: tuple[int, ...] | None = None,
+    full_size: tuple[int, ...] | None = None,
+    discontiguous: bool = False,
+    dtype: torch.dtype = torch.float32,
+) -> bool:
+    """
+    Check whether a tensor shape/stride combination violates TMA descriptor
+    restrictions (see Note: TMA API Restrictions in config.py):
+      R1: innermost stride must be 1
+      R2: outer strides must be 16-byte aligned
+      R3: innermost dimension must load at least 16 bytes
+
+    If strides is None, derives contiguous strides from full_size (matching
+    _discontiguous_tensor behavior). If discontiguous is True, full_size is
+    computed as 2*view_size (matching _discontiguous_tensor). If full_size is
+    also None, derives contiguous strides from view_size.
+
+    This is a simplified approximation of the actual TMA validation in
+    TMACompatibilityChecker.are_block_parameters_compatible() (codegen/triton.py).
+    Key differences from the full codegen:
+      - The codegen strips singleton dims (block_shape==1) and broadcast dims
+        (stride==0) before checking. This function does not, so it may produce
+        false positives for tensors with broadcast dimensions.
+      - R3 here uses view_size[-1] as a proxy for block_shape[-1]. The codegen
+        checks the actual Triton block tile expression, which depends on kernel
+        heuristics and persistent reduction RBLOCK values.
+      - Kernel-level gates (CC>=9.0, assume_aligned_inputs, no_x_dim stores,
+        mask conditions) are not checked here.
+    These simplifications are acceptable for the test shapes in this file.
+    """
+    if discontiguous and full_size is None:
+        full_size = tuple(2 * d for d in view_size)
+
+    if strides is None:
+        base = full_size if full_size is not None else view_size
+        # contiguous strides for base shape
+        strides = []
+        stride = 1
+        for dim in reversed(base):
+            strides.append(stride)
+            stride *= dim
+        strides = tuple(reversed(strides))
+
+    # When transpose_discontiguous_tensor_descriptor is enabled (default),
+    # TMA reorders dimensions by descending stride before generating descriptors.
+    if config.triton.transpose_discontiguous_tensor_descriptor:
+        sort_idx = sorted(range(len(strides)), key=lambda i: strides[i], reverse=True)
+        view_size = tuple(view_size[i] for i in sort_idx)
+        strides = tuple(strides[i] for i in sort_idx)
+
+    element_size = dtype.itemsize
+
+    # R1: innermost stride must be 1
+    if strides[-1] != 1:
+        return True
+
+    # R2: outer strides must be 16-byte aligned
+    for s in strides[:-1]:
+        if (s * element_size) % 16 != 0:
+            return True
+
+    # R3: innermost dimension must load at least 16 bytes
+    if view_size[-1] * element_size < 16:
+        return True
+
+    return False
+
+
+def _pointwise_subtest(full_size, view_size, stride=None, offset=None, require_block_ptr=True, extra_decorators=None):
+    args = (full_size, view_size, stride, offset, require_block_ptr)
+    decorators = list(extra_decorators or [])
+    if require_block_ptr and _fails_tma_check(view_size, strides=stride, full_size=full_size):
+        decorators += [xfail_if_use_tensor_descriptor]
+    return subtest(arg_values=args, decorators=decorators)
+
+
+def _reduction_subtest(view_size, num_block_pointers, num_triton_kernels, extra_decorators=None):
+    args = (view_size, num_block_pointers, num_triton_kernels)
+    decorators = list(extra_decorators or [])
+    if num_block_pointers is not None and _fails_tma_check(view_size, discontiguous=True):
+        decorators += [xfail_if_use_tensor_descriptor]
+    return subtest(arg_values=args, decorators=decorators)
+
+
+def _broadcast_subtest(x_size, y_size):
+    decorators = []
+    for size in (x_size, y_size):
+        if _fails_tma_check(size, discontiguous=True):
+            decorators = [xfail_if_use_tensor_descriptor]
+            break
+    return subtest(arg_values=(x_size, y_size), decorators=decorators)
+
+
 # Config shortcuts
 tiled_reduction_config = {
     "triton.prefer_nd_tiling": True,
@@ -74,34 +169,6 @@ tiled_reduction_config = {
 def xfail_if_use_tensor_descriptor(fn):
     fn._expected_failure_use_tensor_descriptor = True
     return fn
-
-
-TMA_XFAIL = test_torchinductor.TestFailure(GPU_TYPE, is_skip=False)
-_TMA_XFAIL_TESTS = [
-    "test_pointwise_prefer_nd_tiling_False_full_size1_view_size1_stride1_offset1_require_block_ptr_True",
-    "test_pointwise_prefer_nd_tiling_False_full_size4_view_size4_stride4_offset4_require_block_ptr_True",
-    "test_pointwise_prefer_nd_tiling_False_full_size6_view_size6_stride6_offset6_require_block_ptr_True",
-    "test_pointwise_prefer_nd_tiling_True_full_size1_view_size1_stride1_offset1_require_block_ptr_True",
-    "test_pointwise_prefer_nd_tiling_True_full_size4_view_size4_stride4_offset4_require_block_ptr_True",
-    "test_pointwise_prefer_nd_tiling_True_full_size6_view_size6_stride6_offset6_require_block_ptr_True",
-    "test_reduction_prefer_nd_tiling_False_view_size4_num_block_pointers_3_num_triton_kernels_2",
-    "test_reduction_prefer_nd_tiling_False_view_size6_num_block_pointers_3_num_triton_kernels_2",
-    "test_reduction_prefer_nd_tiling_True_view_size4_num_block_pointers_3_num_triton_kernels_2",
-    "test_reduction_prefer_nd_tiling_True_view_size6_num_block_pointers_3_num_triton_kernels_2",
-    "test_2d_reduction_odd_shapes_view_size1_num_block_pointers_3_num_triton_kernels_2_reduction_op1",
-    "test_broadcast_prefer_nd_tiling_False_x_size0_y_size0",
-    "test_broadcast_prefer_nd_tiling_False_x_size2_y_size2",
-    "test_broadcast_prefer_nd_tiling_True_x_size0_y_size0",
-    "test_broadcast_prefer_nd_tiling_True_x_size2_y_size2",
-]
-# On SM100+, reduction tests use single persistent kernels, so some TMA xfails no longer apply.
-if SM100OrLater:
-    _TMA_XFAIL_TESTS = [
-        t
-        for t in _TMA_XFAIL_TESTS
-        if "num_triton_kernels_2" not in t or "view_size4" in t
-    ]
-TMA_TEST_XFAIL = dict.fromkeys(_TMA_XFAIL_TESTS, TMA_XFAIL)
 
 
 class BlockDescriptorTestBase(InductorTestCase):
@@ -224,39 +291,22 @@ class CommonTemplate:
     @parametrize(
         "full_size,view_size,stride,offset,require_block_ptr",
         [
-            ((64, 32, 32), (32, 16, 8), None, None, True),
-            ((16, 8, 8, 8), (8, 8, 4, 2), None, None, True),
-            ((8, 8, 8, 8), (4, 4, 4, 4), None, None, True),
-            ((8, 8), (4, 4), None, 10, True),  # Storage offset
-            ((8, 8), (4, 4), (16, 2), None, True),  # Non-default strides
-            ((8, 8), (4, 4), (1, 8), None, True),  # Transposed strides
-            (
-                (5, 9),
-                (5, 8),
-                None,
-                None,
-                True,
-            ),  # Non-power-of-2 leading dim: block ptr
-            (
-                (15, 9),
-                (15, 3),
-                None,
-                None,
-                False,
-            ),  # Non-power-of-2 inner dims: non-block ptr
-            ((1, 1, 1), (1, 1, 1), None, None, False),  # Scalar: non-block ptr
-            subtest(
-                arg_values=(
-                    (2, 4 * max_block),
-                    (2, 3 * max_block),
-                    None,
-                    None,
-                    True,
-                ),  # Inner dim multiple of max_block
-                decorators=[
-                    test_torchinductor.skip_if_triton_cpu("Triton CPU: slow test")
+            _pointwise_subtest((64, 32, 32), (32, 16, 8)),
+            _pointwise_subtest((16, 8, 8, 8), (8, 8, 4, 2)),
+            _pointwise_subtest((8, 8, 8, 8), (4, 4, 4, 4)),
+            _pointwise_subtest((8, 8), (4, 4), offset=10),  # Storage offset
+            _pointwise_subtest((8, 8), (4, 4), stride=(16, 2)),  # Non-default strides
+            _pointwise_subtest((8, 8), (4, 4), stride=(1, 8)),  # Transposed strides
+            _pointwise_subtest((5, 9), (5, 8)),  # Non-power-of-2 leading dim: block ptr
+            _pointwise_subtest((15, 9), (15, 3), require_block_ptr=False),  # Non-power-of-2 inner dims: non-block ptr
+            _pointwise_subtest((1, 1, 1), (1, 1, 1), require_block_ptr=False),  # Scalar: non-block ptr
+            _pointwise_subtest(
+                (2, 4 * max_block),
+                (2, 3 * max_block),
+                extra_decorators=[
+                    test_torchinductor.skip_if_triton_cpu("Triton CPU: slow test"),
                 ],
-            ),
+            ),  # Inner dim multiple of max_block
         ],
     )
     def test_pointwise(
@@ -300,16 +350,10 @@ class CommonTemplate:
     @parametrize(
         "x_size,y_size",
         [
-            ((8, 8), (8, 1)),
-            ((8, 8), (1, 8)),
-            (
-                (4, 1, 4),
-                (1, 4, 1),
-            ),  # Very important case: index variables are disjoint!
-            (
-                (1, 1, 1, 4),
-                (4, 4, 4, 4),
-            ),  # Unmatched dims for first operand.
+            _broadcast_subtest((8, 8), (8, 1)),
+            _broadcast_subtest((8, 8), (1, 8)),
+            _broadcast_subtest((4, 1, 4), (1, 4, 1)),  # Very important case: index variables are disjoint!
+            _broadcast_subtest((1, 1, 1, 4), (4, 4, 4, 4)),  # Unmatched dims for first operand.
         ],
     )
     def test_broadcast(
@@ -516,23 +560,20 @@ class CommonTemplate:
     @parametrize(
         "view_size,num_block_pointers,num_triton_kernels",
         [
-            ((4, 4), 1, 1),
-            ((4, 4, 4), 1, 1),
-            ((8, 8, 8), 1, 1),
-            ((15, 15), None, 1),  # Non-power of 2
-            # Multiple of max block. Uses loops.
-            subtest(
-                arg_values=((3 * max_block, 2), 3, 2),
-                decorators=[
-                    test_torchinductor.skip_if_triton_cpu("Triton CPU: slow test")
-                ],
+            _reduction_subtest((4, 4), 1, 1),
+            _reduction_subtest((4, 4, 4), 1, 1),
+            _reduction_subtest((8, 8, 8), 1, 1),
+            _reduction_subtest((15, 15), None, 1),  # Non-power of 2
+            _reduction_subtest(  # Multiple of max block. Uses loops.
+                (3 * max_block, 2), 3, 2,
+                extra_decorators=[test_torchinductor.skip_if_triton_cpu("Triton CPU: slow test")],
             ),
-            (
-                (2, 3 * max_block),
-                2,
-                2,
-            ),  # Multiple of max block. Uses loops.
-            ((128, 128), 3, 2),  # Test a large size, with loops.
+            _reduction_subtest((2, 3 * max_block), 2, 2),  # Multiple of max block. Uses loops.
+            # 2-kernel split xfails TMA; on SM100+ uses single persistent kernel and passes.
+            subtest(
+                arg_values=((128, 128), 3, 2),
+                decorators=[] if SM100OrLater else [xfail_if_use_tensor_descriptor],
+            ),
         ],
     )
     def test_reduction(
@@ -1654,7 +1695,6 @@ test_torchinductor.copy_tests(
     TritonTensorDescriptorTestCUDA,
     GPU_TYPE,
     xfail_prop="_expected_failure_use_tensor_descriptor",
-    test_failures=TMA_TEST_XFAIL,
 )
 
 
