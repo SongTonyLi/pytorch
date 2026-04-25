@@ -35,22 +35,11 @@ typedef int (*nn_compute_source_index_fn_t)(const float, int, int);
 // nearest_neighbor_exact_bw_compute_source_index
 typedef int (*nn_bw_compute_source_index_fn_t)(const float, int, int);
 
-// The original implementation for ROCm assumed that gridDim.x fully covers width2
-// and gridDim.y fully covers height2 (only the Z/nc dimension used a stride loop).
-// The original code even had a TODO comment acknowledging this:
-// "TODO: kernel implementation could stride on spatial dimension. We probably
-// need to overhaul the kernel."
-//
-// On ROCm/HIP, gridDim.{x,y,z} * blockDim.{x,y,z} must be < 2^32 per dimension.
-// For large spatial outputs, this constraint can be violated even when
-// individual grid dimensions are within maxGridSize limits.
-//
-// The fix converts the X (width) and Y (height) dimensions to grid-stride loops,
-// so the host-side launch template can clamp grid dimensions to safe values
-// without losing coverage of the output tensor.
-//
-// This is safe on CUDA as well — when the grid already covers the full spatial range,
-// each stride-loop body executes exactly once per thread.
+// On ROCm/HIP, gridDim.{x,y,z} * blockDim.{x,y,z} must be < 2^32 per dimension
+// (the HSA AQL dispatch packet stores global work sizes as uint32_t).
+// For large spatial outputs, the host-side launch code clamps grid dimensions
+// on ROCm so the product stays below UINT32_MAX.  This kernel uses grid-stride
+// loops on X, Y, and Z so that a clamped grid still covers the full output.
 
 // see NOTE [ Nearest neighbor upsampling kernel implementation ]
 template <typename scalar_t, nn_compute_source_index_fn_t nn_compute_source_index_fn>
@@ -65,13 +54,11 @@ __global__ void upsample_nearest2d_out_frame(
     const size_t width2,
     float height_scale,
     float width_scale) {
-  // Grid-stride loop over the width (X) dimension
   for (int64_t w2 = static_cast<int64_t>(threadIdx.x) +
                      static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x);
        w2 < static_cast<int64_t>(width2);
        w2 += static_cast<int64_t>(blockDim.x) * static_cast<int64_t>(gridDim.x)) {
 
-    // Grid-stride loop over the height (Y) dimension
     for (int64_t h2 = static_cast<int64_t>(threadIdx.y) +
                        static_cast<int64_t>(blockIdx.y) * static_cast<int64_t>(blockDim.y);
          h2 < static_cast<int64_t>(height2);
@@ -84,8 +71,6 @@ __global__ void upsample_nearest2d_out_frame(
           ? static_cast<size_t>(w2)
           : nn_compute_source_index_fn(width_scale, w2, width1);
 
-      // Grid-stride loop over the batch*channels (Z) dimension
-      // (This was already a stride loop in the original kernel.)
       size_t nc_iter = threadIdx.z + blockIdx.z * blockDim.z;
       int64_t nc_stride = static_cast<int64_t>(blockDim.z) * static_cast<int64_t>(gridDim.z);
 
@@ -94,7 +79,6 @@ __global__ void upsample_nearest2d_out_frame(
       size_t dst_index = (nc_iter * height2 + static_cast<size_t>(h2)) * width2 + static_cast<size_t>(w2);
       size_t dst_index_stride = nc_stride * width2 * height2;
 
-      // Iterating over batch*channels
       while (nc_iter < nc) {
         odata[dst_index] = idata[src_index];
         dst_index += dst_index_stride;
@@ -378,17 +362,20 @@ static void upsample_nearest2d_out_cuda_template(
 
 #ifdef USE_ROCM
     // HIP does not support gridDim.{x,y,z} * blockDim.{x,y,z} >= 2^32 per dimension.
-    // Clamp each grid dimension to satisfy this constraint.
-    // The corrected kernel uses grid-stride loops on X and Y (and already had
-    // a stride loop on Z), so the clamped grid still covers the full output tensor.
+    // Clamp each grid dimension so the product stays below UINT32_MAX.
+    // The kernel uses block-stride loops on X and Y (and already had a stride
+    // loop on Z), so the clamped grid still covers the full output tensor.
+    //
+    // Use int64_t arithmetic to avoid undefined behavior: when block_{dim}
+    // is 1, UINT32_MAX / 1 = 4294967295 which overflows signed int.
     {
-      constexpr unsigned int kHipMaxGlobalWorkSize = 4294967295U;  // UINT32_MAX
-      int safe_max_grid_x = static_cast<int>(kHipMaxGlobalWorkSize / static_cast<unsigned int>(block_x));
-      int safe_max_grid_y = static_cast<int>(kHipMaxGlobalWorkSize / static_cast<unsigned int>(block_y));
-      int safe_max_grid_z = static_cast<int>(kHipMaxGlobalWorkSize / static_cast<unsigned int>(block_z));
-      grid_x = std::min(grid_x, safe_max_grid_x);
-      grid_y = std::min(grid_y, safe_max_grid_y);
-      grid_z = std::min(grid_z, safe_max_grid_z);
+      constexpr int64_t kHipMaxGlobalWorkSize = 4294967295LL;  // UINT32_MAX
+      grid_x = std::min(grid_x, static_cast<int>(std::min(
+          kHipMaxGlobalWorkSize / block_x, static_cast<int64_t>(INT_MAX))));
+      grid_y = std::min(grid_y, static_cast<int>(std::min(
+          kHipMaxGlobalWorkSize / block_y, static_cast<int64_t>(INT_MAX))));
+      grid_z = std::min(grid_z, static_cast<int>(std::min(
+          kHipMaxGlobalWorkSize / block_z, static_cast<int64_t>(INT_MAX))));
     }
 #else
     // On CUDA, the original check is sufficient — CUDA's maxGridSize[0] is
