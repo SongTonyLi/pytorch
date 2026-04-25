@@ -3,11 +3,11 @@
 #include <string>
 
 /// Store an exception and its backtrace that occurred in the calling thread.
-AOTI_TORCH_EXPORT void torch_exception_state_store_what(
+AOTI_TORCH_EXPORT void torch_exception_state_set_what(
     const std::string& our_message);
 
 /// Store an exception that occurred in the calling thread.
-AOTI_TORCH_EXPORT void torch_exception_state_store_what_without_backtrace(
+AOTI_TORCH_EXPORT void torch_exception_state_set_what_without_backtrace(
     const std::string& our_message);
 
 /// Retrieves the exception and backtrace that was stored in this thread.

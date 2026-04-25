@@ -6,12 +6,12 @@ thread_local std::string torch_exception_what_without_backtrace;
 // Default to printing the exception since that was the historical behaviour.
 thread_local bool torch_exception_printing_enabled = true;
 
-AOTI_TORCH_EXPORT void torch_exception_state_store_what(
+AOTI_TORCH_EXPORT void torch_exception_state_set_what(
     const std::string& our_message) {
   torch_exception_what = our_message;
 }
 
-AOTI_TORCH_EXPORT void torch_exception_state_store_what_without_backtrace(
+AOTI_TORCH_EXPORT void torch_exception_state_set_what_without_backtrace(
 
     const std::string& our_message) {
   torch_exception_what_without_backtrace = our_message;
