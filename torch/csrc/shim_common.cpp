@@ -1,6 +1,7 @@
 #include <c10/core/Device.h>
 #include <c10/core/DispatchKey.h>
 #include <c10/util/Exception.h>
+#include <shim_exception_state.h>
 #include <torch/csrc/inductor/aoti_runtime/utils.h>
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch/csrc/inductor/aoti_torch/tensor_converter.h>
@@ -16,6 +17,7 @@
 #endif // AT_PER_OPERATOR_HEADERS
 #include <ATen/Parallel.h>
 #include <torch/csrc/shim_conversion_utils.h>
+#include <torch/csrc/shim_exception_state.h>
 #include <torch/csrc/stable/c/shim.h>
 
 AOTITorchError torch_new_list_reserve_size(size_t size, StableListHandle* ret) {
@@ -742,29 +744,19 @@ AOTI_TORCH_EXPORT AOTITorchError torch_library_def_with_tags(
         torch::schema(schema), tag_vec, torch::_RegisterOrVerify::REGISTER);
   });
 
-
-AOTI_TORCH_EXPORT thread_local std::string torch_exception_what;
-AOTI_TORCH_EXPORT thread_local std::string
-    torch_exception_what_without_backtrace;
-
-// Default to printing the exception since that was the historical behaviour.
-AOTI_TORCH_EXPORT thread_local bool torch_exception_printing_enabled = true;
-
 AOTI_TORCH_EXPORT const char* torch_exception_get_what() {
-  return torch_exception_what.c_str();
+  return torch_exception_state_get_what().c_str();
 }
 
 AOTI_TORCH_EXPORT const char* torch_exception_get_what_without_backtrace() {
-  return torch_exception_what_without_backtrace.c_str();
+  return torch_exception_state_get_what_without_backtrace().c_str();
 }
 
 AOTI_TORCH_EXPORT bool torch_exception_set_exception_printing(
     bool should_print) {
-  const bool previous = torch_exception_printing_enabled;
-  torch_exception_printing_enabled = should_print;
-  return previous;
+  return torch_exception_state_set_exception_printing(should_print);
 }
 
 AOTI_TORCH_EXPORT bool torch_exception_get_exception_printing() {
-  return torch_exception_printing_enabled;
+  return torch_exception_state_get_exception_printing();
 }

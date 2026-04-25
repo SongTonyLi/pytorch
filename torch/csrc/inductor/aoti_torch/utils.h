@@ -10,34 +10,40 @@
 #include <c10/util/OptionalArrayRef.h>
 #include <c10/util/irange.h>
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
-#include <torch/csrc/shim_common.h>
+#include <torch/csrc/shim_exception_state.h>
 #include <optional>
 
-#define AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(...)                  \
-  try {                                                                  \
-    __VA_ARGS__                                                          \
-  } catch (const c10::Error& e) {                                        \
-    torch_exception_what = e.what();                                     \
-    torch_exception_what_without_backtrace = e.what_without_backtrace(); \
-    if (torch_exception_printing_enabled) {                              \
-      LOG(ERROR) << "Exception in aoti_torch: " << torch_exception_what; \
-    }                                                                    \
-    return AOTI_TORCH_FAILURE;                                           \
-  } catch (const std::exception& e) {                                    \
-    torch_exception_what = e.what();                                     \
-    torch_exception_what_without_backtrace = torch_exception_what;       \
-    if (torch_exception_printing_enabled) {                              \
-      LOG(ERROR) << "Exception in aoti_torch: " << torch_exception_what; \
-    }                                                                    \
-    return AOTI_TORCH_FAILURE;                                           \
-  } catch (...) {                                                        \
-    torch_exception_what = "UNKNOWN";                                    \
-    torch_exception_what_without_backtrace = torch_exception_what;       \
-    if (torch_exception_printing_enabled) {                              \
-      LOG(ERROR) << "Exception in aoti_torch: " << torch_exception_what; \
-    }                                                                    \
-    return AOTI_TORCH_FAILURE;                                           \
-  }                                                                      \
+#define AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(...)   \
+  try {                                                   \
+    __VA_ARGS__                                           \
+  } catch (const c10::Error& e) {                         \
+    torch_exception_state_store_what(e.what());           \
+    torch_exception_state_store_what_without_backtrace(   \
+        e.what_without_backtrace());                      \
+    if (torch_exception_state_get_exception_printing()) { \
+      LOG(ERROR) << "Exception in aoti_torch: "           \
+                 << torch_exception_state_get_what();     \
+    }                                                     \
+    return AOTI_TORCH_FAILURE;                            \
+  } catch (const std::exception& e) {                     \
+    torch_exception_state_store_what(e.what());           \
+    torch_exception_state_store_what_without_backtrace(   \
+        torch_exception_state_get_what());                \
+    if (torch_exception_state_get_exception_printing()) { \
+      LOG(ERROR) << "Exception in aoti_torch: "           \
+                 << torch_exception_state_get_what();     \
+    }                                                     \
+    return AOTI_TORCH_FAILURE;                            \
+  } catch (...) {                                         \
+    torch_exception_state_store_what("UNKNOWN");          \
+    torch_exception_state_store_what_without_backtrace(   \
+        torch_exception_state_get_what());                \
+    if (torch_exception_state_get_exception_printing()) { \
+      LOG(ERROR) << "Exception in aoti_torch: "           \
+                 << torch_exception_state_get_what();     \
+    }                                                     \
+    return AOTI_TORCH_FAILURE;                            \
+  }                                                       \
   return AOTI_TORCH_SUCCESS;
 
 namespace torch::aot_inductor {
