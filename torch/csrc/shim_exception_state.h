@@ -2,11 +2,11 @@
 #include <torch/csrc/inductor/aoti_torch/c/macros.h>
 #include <string>
 
-/// Store an exception and its backtrace that occured in the calling thread.
+/// Store an exception and its backtrace that occurred in the calling thread.
 AOTI_TORCH_EXPORT void torch_exception_state_store_what(
     const std::string& our_message);
 
-/// Store an exception that occured in the calling thread.
+/// Store an exception that occurred in the calling thread.
 AOTI_TORCH_EXPORT void torch_exception_state_store_what_without_backtrace(
     const std::string& our_message);
 
