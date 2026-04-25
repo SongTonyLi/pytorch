@@ -442,8 +442,6 @@ MPSNDArray* getStridedMPSNDArray(const TensorBase& src, MPSNDArray* srcNDArray) 
   auto sizes = src.sizes();
   auto nStrides = strides.size();
   auto nonZeroStrides = src.strides();
-  int64_t crtNonZeroStride = 1;
-  bool hasZeroStrides = false;
   auto sortedStridesIndices = getSortedStrides(nonZeroStrides);
 
   NSMutableArray<NSNumber*>* sortedStridesShape = [NSMutableArray arrayWithCapacity:nStrides];
@@ -645,6 +643,8 @@ MPSScalar getMPSScalar(const Scalar& scalar, ScalarType type) {
     case ScalarType::ComplexDouble:
       return {.size = sizeof(int64_t), .type = type, .value.cf = scalar.to<c10::complex<float>>()};
     // Unsigned types
+    case ScalarType::UInt64:
+      return {.size = sizeof(uint64_t), .type = type, .value.u = scalar.to<uint64_t>()};
     case ScalarType::UInt32:
       return {.size = sizeof(uint32_t), .type = type, .value.i = scalar.to<uint32_t>()};
     case ScalarType::UInt16:
@@ -931,16 +931,21 @@ MetalKernelFunction* MetalShaderLibrary::getCachedKernelFunctionPtr(const std::s
   return raw_ptr;
 }
 
-class BundledShaderLibary : public MetalShaderLibrary {
+class BundledShaderLibrary : public MetalShaderLibrary {
  public:
-  BundledShaderLibary() : MetalShaderLibrary("") {}
+  BundledShaderLibrary() : MetalShaderLibrary("") {}
 
  protected:
   id<MTLLibrary> getLibrary() override {
     if (C10_UNLIKELY(!library)) {
       auto device = MPSDevice::getInstance()->device();
       NSError* error = nil;
-      library = [device newLibraryWithData:getSectionData("metal_basic") error:&error];
+#ifdef CAN_BUILD_METAL_4
+      const auto section_name = is_macos_13_or_newer(MacOSVersion::MACOS_VER_26_0_PLUS) ? "metal_40" : "metal_basic";
+#else
+      const auto section_name = "metal_basic";
+#endif
+      library = [device newLibraryWithData:getSectionData(section_name) error:&error];
       TORCH_CHECK(library, "Failed to create metal library, error: ", [[error description] UTF8String]);
     }
     return library;
@@ -1323,12 +1328,39 @@ void MetalShaderLibrary::exec_ternary_kernel(TensorIteratorBase& iter, const std
 }
 
 MetalShaderLibrary& MetalShaderLibrary::getBundledLibrary() {
-  static BundledShaderLibary l;
+  static BundledShaderLibrary l;
   return l;
 }
 
 // DynamicMetalShaderLibrary implementation
 DynamicMetalShaderLibrary::~DynamicMetalShaderLibrary() {
+  [library release];
+}
+
+// PrecompiledMetalShaderLibrary implementation
+PrecompiledMetalShaderLibrary::PrecompiledMetalShaderLibrary(std::vector<uint8_t> data) : MetalShaderLibrary("") {
+  auto device = MPSDevice::getInstance()->device();
+  NSError* error = nil;
+  dispatch_data_t dd =
+      dispatch_data_create(data.data(), data.size(), dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+  library = [device newLibraryWithData:dd error:&error];
+  dispatch_release(dd);
+  TORCH_CHECK(library, "Failed to load metallib: ", error ? [[error description] UTF8String] : "unknown error");
+}
+
+PrecompiledMetalShaderLibrary::PrecompiledMetalShaderLibrary(const std::string& path) : MetalShaderLibrary("") {
+  auto device = MPSDevice::getInstance()->device();
+  NSError* error = nil;
+  NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+  library = [device newLibraryWithURL:url error:&error];
+  TORCH_CHECK(library,
+              "Failed to load metallib from '",
+              path,
+              "': ",
+              error ? [[error description] UTF8String] : "unknown error");
+}
+
+PrecompiledMetalShaderLibrary::~PrecompiledMetalShaderLibrary() {
   [library release];
 }
 

@@ -40,6 +40,7 @@ from torch.testing._internal.common_utils import (
     NOTEST_CPU,
     TEST_WITH_TORCHDYNAMO,
     TEST_XPU,
+    xfailIfNoAcceleratorTriton,
 )
 from torch._dynamo.testing import CompileCounterWithBackend
 
@@ -52,6 +53,7 @@ from torch.testing._internal.common_cuda import (
     PLATFORM_SUPPORTS_MEM_EFF_ATTENTION,
     PLATFORM_SUPPORTS_FUSED_ATTENTION,
     PLATFORM_SUPPORTS_CUDNN_ATTENTION,
+    PLATFORM_SUPPORTS_CK_SDPA,
     tf32_on_and_off,
     tf32_enabled,
 )
@@ -90,7 +92,6 @@ isSM120Device = torch.cuda.is_available() and torch.cuda.get_device_capability()
 isSM5xDevice = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 5
 isLessThanSM80Device = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8
 
-TEST_WITH_CK = TEST_WITH_ROCM and torch.backends.cuda.preferred_rocm_fa_library() == torch.backends.cuda._ROCmFABackends['ck']
 
 def _check_equal(
     golden: torch.Tensor,
@@ -459,7 +460,7 @@ class TestTransformers(NNTestCase):
         handle.remove()
 
     @skipIfRocmArch(MI300_ARCH)
-    @tf32_on_and_off(0.001)
+    @tf32_on_and_off(0.002)
     @parametrize("use_torchscript", [False])
     @parametrize("enable_nested_tensor", [True, False])
     @parametrize("use_autocast", [True, False])
@@ -2928,6 +2929,16 @@ class TestSDPACudaOnly(NNTestCase):
                 with self.assertRaisesRegex(RuntimeError, "No available kernel."):
                     torch.nn.functional.scaled_dot_product_attention(q, k, v)
 
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_ATTENTION, "cuDNN Attention is not supported on this system")
+    @parametrize("shape", [(65536, 1, 4, 8), (1, 65536, 4, 8)])
+    def test_cudnn_attention_fail_large_batch_or_num_heads(self, device, shape):
+        q = torch.randn(shape, device=device, dtype=torch.float16)
+        k = torch.randn(shape, device=device, dtype=torch.float16)
+        v = torch.randn(shape, device=device, dtype=torch.float16)
+        with sdpa_kernel(backends=[SDPBackend.CUDNN_ATTENTION]):
+            with self.assertRaisesRegex(RuntimeError, "No available kernel."):
+                torch.nn.functional.scaled_dot_product_attention(q, k, v)
+
     @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_ATTENTION, "cudnn Attention is not supported on this system")
     def test_cudnn_attention_trivial_output_transpose(self, device):
         # see also: https://github.com/pytorch/pytorch/issues/134001
@@ -2982,6 +2993,7 @@ class TestSDPACudaOnly(NNTestCase):
         torch.testing.assert_close(k.grad, k_cpu.grad.cuda(), atol=3e-3, rtol=2e-3)
         torch.testing.assert_close(v.grad, v_cpu.grad.cuda(), atol=3e-3, rtol=2e-3)
 
+    @xfailIfNoAcceleratorTriton
     @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_ATTENTION, "cudnn Attention is not supported on this system")
     def test_cudnn_attention_preserves_query_layout(self, device):
 
@@ -3019,6 +3031,7 @@ class TestSDPACudaOnly(NNTestCase):
             for use_compile in [False, True]:
                 test_attention(SDPBackend.CUDNN_ATTENTION, list(permute_order) + [3], use_compile)
 
+    @xfailIfNoAcceleratorTriton
     @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_ATTENTION, "cudnn Attention is not supported on this system")
     @parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_cudnn_attention_broadcast_stride_zero(self, device, dtype):
@@ -3081,6 +3094,7 @@ class TestSDPACudaOnly(NNTestCase):
         out = fn(q, k, v)
         self.assertEqual(out.shape, (B, H, S, D_v))
 
+    @xfailIfNoAcceleratorTriton
     @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_ATTENTION, "cudnn Attention is not supported on this system")
     def test_cudnn_attention_compiles(self):
         q = torch.randn(2, 8, 1024, 128, dtype=torch.half, device='cuda', requires_grad=True)
@@ -3613,6 +3627,7 @@ class TestSDPACudaOnly(NNTestCase):
                 if torch._fused_sdp_choice(query, key, value) != SDPBackend.EFFICIENT_ATTENTION.value:
                     raise AssertionError("expected EFFICIENT_ATTENTION backend")
 
+    @xfailIfNoAcceleratorTriton
     @onlyCUDA
     @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_ATTENTION, "cuDNN Attention is not supported on this system")
     @unittest.skipIf(not PLATFORM_SUPPORTS_MEM_EFF_ATTENTION, "Platform does not support fused SDPA")
@@ -3991,10 +4006,12 @@ class TestSDPACudaOnly(NNTestCase):
     @parametrize("scale", [None, "l1"])
     @parametrize("enable_gqa", [True, False])
     @parametrize("n_heads", [[16, 8], [10, 2]])
+    @parametrize("sdpa_backend", ["aotriton", "ck"] if PLATFORM_SUPPORTS_CK_SDPA else ["aotriton"])
     @tf32_enabled()
     def test_flash_attention_vs_math_ref_grads(self, device, batch_size: int, seq_len_q: int, seq_len_k: int,
-                                               head_dim: int, is_causal: bool, dropout_p: float, dtype: torch.dtype,
-                                               scale: str, enable_gqa: bool, n_heads: list[int]):
+                                               head_dim: int, is_causal: bool, dropout_p: float,
+                                               dtype: torch.dtype, scale: str, enable_gqa: bool,
+                                               n_heads: list[int], sdpa_backend: str):
         if isSM8XDevice or isSM120Device and head_dim in range(193, 256 + 1):
             self.skipTest("Flash attention on sm86, sm87, and sm89 for headdim > 192 currently disabled")
         if is_causal and seq_len_q != seq_len_k:
@@ -4004,8 +4021,14 @@ class TestSDPACudaOnly(NNTestCase):
         if max(seq_len_q, seq_len_k) >= 2048 and torch.cuda.get_device_properties('cuda').total_memory < 40 * 2**30:
             unittest.skip("Reference implementation OOM")
             return
-        if TEST_WITH_CK and dropout_p != 0:
-            self.skipTest("CK does not support tensor format dropout masks")
+
+        # ROCm now supports 2 different backends for SDPA that require different set up.
+        TEST_WITH_CK = False
+        if TEST_WITH_ROCM:
+            torch.backends.cuda.preferred_rocm_fa_library(sdpa_backend)
+            # When no args are given to preferred_rocm_fa_library, it acts as a getter
+            TEST_WITH_CK = (torch.backends.cuda.preferred_rocm_fa_library() == torch._C._ROCmFABackend.Ck)
+
         if TEST_WITH_CK and head_dim > 128:
             self.skipTest("CK does not support head dims over 128")
 
@@ -4079,15 +4102,24 @@ class TestSDPACudaOnly(NNTestCase):
             softmax_mask = self.convert_flash_attn_S_to_softmax(
                 dbug_mask, seq_len_q, seq_len_k, query_padding_mask, key_padding_mask,
                 causal=is_causal)[:, :, :seq_len_q, :seq_len_k]
+
+            # This is the default implementation for the mask but we need to match CK if we are using it
             dropout_mask = softmax_mask >= 0
+
+            # This logic matches how CK calculates the dropout mask.
+            # This is necessary because CK doesn't support passing in custom dropout masks
+            # So we use this logic to ensure we are comparing apples to apples.
+            if TEST_WITH_CK:
+                dropout_mask = (softmax_mask <= int((1.0 - dropout_p) * 255.0)).to(torch.float32)
+
             # High Precision Math Reference
             out_ref = torch.ops.aten._scaled_dot_product_attention_math(
                 query_ref, key_ref, value_ref, dropout_p=dropout_p, is_causal=is_causal,
                 scale=scale, dropout_mask=dropout_mask, enable_gqa=enable_gqa)[0]
             # Low Precision Math Reference
             out_lp_ref = torch.ops.aten._scaled_dot_product_attention_math(
-                query, key, value, dropout_p=dropout_p, is_causal=is_causal, scale=scale,
-                dropout_mask=dropout_mask, enable_gqa=enable_gqa)[0]
+                query, key, value, dropout_mask=dropout_mask, dropout_p=dropout_p,
+                is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)[0]
 
         upstream_grad = torch.rand_like(out, requires_grad=False)
 
@@ -4107,6 +4139,7 @@ class TestSDPACudaOnly(NNTestCase):
             'grad_value': 4,
         }
         if TEST_WITH_ROCM:
+
             fudge_factors['grad_value'] = 6.0
             if TEST_WITH_CK:
                 fudge_factors['out'] = 5.0

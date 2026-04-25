@@ -665,7 +665,10 @@ def can_skip_internal_checks(pr: GitHubPR, comment_id: int | None = None) -> boo
     comment = pr.get_comment_by_id(comment_id)
     if comment.editor_login is not None:
         return False
-    return comment.author_login == "facebook-github-bot"
+    if comment.author_login == "facebook-github-bot":
+        return True
+    # facebook-github-tools is a GitHub App; identify by its app URL.
+    return comment.author_url == "https://github.com/apps/facebook-github-tools"
 
 
 def _revlist_to_prs(
@@ -2034,9 +2037,13 @@ def validate_revert(
     # For some reason, one can not be a member of private repo, only CONTRIBUTOR
     if pr.is_base_repo_private():
         allowed_reverters.append("CONTRIBUTOR")
-    # Special case the pytorch-auto-revert app, whose does not have association
-    # But should be able to issue revert command
-    if comment.author_url == "https://github.com/apps/pytorch-auto-revert":
+    # Special case GitHub Apps that don't have a repo association
+    # but should be able to issue revert commands
+    allowed_apps = {
+        "https://github.com/apps/pytorch-auto-revert",
+        "https://github.com/apps/facebook-github-tools",
+    }
+    if comment.author_url in allowed_apps:
         allowed_reverters.append("NONE")
 
     if author_association not in allowed_reverters:

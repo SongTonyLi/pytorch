@@ -96,10 +96,29 @@ def _maybe_run_with_interpreter(fn):
     return maybe_interpreted_fn
 
 
+def _hop_compile_and_call(fn, args, kwargs=None):
+    """Compile and call fn with fullgraph=True for HOP eager execution.
+
+    Pre-activates the fullgraph counter so that compile_wrapper treats this as
+    a nested compile.  This avoids erroring when a non-infra dispatch mode
+    causes the frame to be skipped — the function still executes eagerly within
+    compile_wrapper and returns normally.
+    """
+    from torch._dynamo.eval_frame import set_fullgraph_compiled_frame_count
+
+    with setup_compilation_env() as backend:
+        old_count = set_fullgraph_compiled_frame_count(0)
+        try:
+            return torch.compile(fn, backend=backend, fullgraph=True)(
+                *args, **(kwargs or {})
+            )
+        finally:
+            set_fullgraph_compiled_frame_count(old_count)
+
+
 def _maybe_compile_and_run_fn(fn, *args):
     if not torch.compiler.is_dynamo_compiling():
-        with setup_compilation_env() as backend:  # type: ignore[attr-defined]
-            return torch.compile(fn, backend=backend, fullgraph=True)(*args)
+        return _hop_compile_and_call(fn, args)
     else:
         return fn(*args)
 
@@ -466,9 +485,9 @@ def _check_alias_and_mutation(graph_module, inputs_fake, name, pre_dispatch):
         graph_module, inputs_fake, pre_dispatch=pre_dispatch
     )
     if aliases:
-        raise RuntimeError(f"{name} might be aliasing the input or the output!")  # noqa: F541
+        raise RuntimeError(f"{name} might be aliasing the input or the output!")
     if inp_mutation:
-        raise RuntimeError(f"{name} might be modifying the input!")  # noqa: F541
+        raise RuntimeError(f"{name} might be modifying the input!")
 
 
 def unique_graph_id(proxy_mode, prefix):
@@ -1018,6 +1037,21 @@ def _tensor_storage(t) -> StorageWeakRef:
     return StorageWeakRef(t._typed_storage())
 
 
+def _get_example_value(n):
+    if not isinstance(n, torch.fx.Node):
+        return n
+    if "val" in n.meta:
+        return n.meta["val"]
+    if "example_value" in n.meta:
+        return n.meta["example_value"]
+    return None
+
+
+def get_graph_output_example_values(gm: torch.fx.GraphModule) -> list[Any]:
+    output_node = gm.graph.find_nodes(op="output")[0]
+    return [_get_example_value(n) for n in pytree.tree_flatten(output_node.args[0])[0]]
+
+
 def check_input_alias_and_mutation_return_outputs(
     gm: torch.fx.GraphModule,
 ) -> tuple[
@@ -1027,22 +1061,12 @@ def check_input_alias_and_mutation_return_outputs(
     list[int],
     tuple[Any, ...] | list[Any],
 ]:
-    def _get_example_value(n):
-        if not isinstance(n, torch.fx.Node):
-            return n
-        else:
-            return n.meta["val"] if "val" in n.meta else n.meta["example_value"]
-
     fake_args = [
         _get_example_value(n)
         for n in gm.graph.find_nodes(op="placeholder")
         if isinstance(n, torch.fx.Node) and "val" in n.meta
     ]
-    outputs = [
-        _get_example_value(n)
-        for n in pytree.tree_flatten(gm.graph.find_nodes(op="output")[0].args[0])[0]
-        if not isinstance(n, torch.fx.Node) or "val" in n.meta
-    ]
+    outputs = get_graph_output_example_values(gm)
 
     # We need to analyze the original fake_args to detect
     # inp-inp alias.

@@ -42,23 +42,6 @@ using miopen_depthwise_convolution_backward_fn = std::tuple<at::Tensor,at::Tenso
     const at::Tensor&, const at::Tensor&, const at::Tensor&, at::IntArrayRef, at::IntArrayRef,
     at::IntArrayRef, int64_t, bool, bool, std::array<bool,3>);
 DECLARE_DISPATCH(miopen_depthwise_convolution_backward_fn, miopen_depthwise_convolution_backward_stub)
-using hipdnn_convolution_backward_fn = std::tuple<at::Tensor,at::Tensor,at::Tensor>(*)(
-    const at::Tensor&, const at::Tensor&, const at::Tensor&, at::IntArrayRef, at::IntArrayRef,
-    at::IntArrayRef, int64_t, bool, bool, std::array<bool,3>);
-DECLARE_DISPATCH(hipdnn_convolution_backward_fn, hipdnn_convolution_backward_stub)
-using hipdnn_convolution_fn = at::Tensor(*)(
-    const at::Tensor&, const at::Tensor&, const std::optional<at::Tensor>&,
-    at::IntArrayRef, at::IntArrayRef, at::IntArrayRef, int64_t, bool, bool);
-DECLARE_DISPATCH(hipdnn_convolution_fn, hipdnn_convolution_stub)
-using hipdnn_convolution_transpose_backward_fn = std::tuple<at::Tensor,at::Tensor,at::Tensor>(*)(
-    const at::Tensor&, const at::Tensor&, const at::Tensor&, at::IntArrayRef, at::IntArrayRef,
-    at::IntArrayRef, at::IntArrayRef, int64_t, bool, bool, std::array<bool,3>);
-DECLARE_DISPATCH(hipdnn_convolution_transpose_backward_fn, hipdnn_convolution_transpose_backward_stub)
-using hipdnn_convolution_transpose_fn = at::Tensor(*)(
-    const at::Tensor&, const at::Tensor&, const std::optional<at::Tensor>&,
-    at::IntArrayRef, at::IntArrayRef, at::IntArrayRef, at::IntArrayRef, int64_t, bool, bool);
-DECLARE_DISPATCH(hipdnn_convolution_transpose_fn, hipdnn_convolution_transpose_stub)
-
 using mkldnn_convolution_backward_fn = std::tuple<at::Tensor,at::Tensor,at::Tensor>(*)(
     const at::Tensor&, const at::Tensor&, const at::Tensor&, at::IntArrayRef, at::IntArrayRef,
     at::IntArrayRef, int64_t, std::array<bool,3>);
@@ -134,8 +117,6 @@ enum class ConvBackend {
   Xnnpack2d,
   Mps,
   MpsTranspose,
-  Hipdnn,
-  HipdnnTranspose,
 };
 
 // Overload for selecting the convolution backend from the full set of convolution inputs.
@@ -352,12 +333,11 @@ inline at::MemoryFormat cudnn_conv_suggest_memory_format(const at::Tensor& input
       weight.scalar_type() == at::kDouble) {
     return at::MemoryFormat::Contiguous;
   }
-  long cudnn_version = at::detail::getCUDAHooks().versionCuDNN();
   auto input_memory_format = input.suggest_memory_format();
   auto weight_memory_format = weight.suggest_memory_format();
   auto weight_ndim = weight.ndimension();
 
-  bool can_use_cudnn_channels_last_2d = (cudnn_version >= 7603) && (weight_ndim == 4) && (
+  bool can_use_cudnn_channels_last_2d = weight_ndim == 4 && (
     (input_memory_format  == at::MemoryFormat::ChannelsLast) ||
     (weight_memory_format == at::MemoryFormat::ChannelsLast)
   );
@@ -365,7 +345,7 @@ inline at::MemoryFormat cudnn_conv_suggest_memory_format(const at::Tensor& input
     return at::MemoryFormat::ChannelsLast;
   }
 
-  bool can_use_cudnn_channels_last_3d = (cudnn_version >= 8005) && (weight_ndim == 5) && (
+  bool can_use_cudnn_channels_last_3d = weight_ndim == 5 && (
     (input_memory_format  == at::MemoryFormat::ChannelsLast3d) ||
     (weight_memory_format == at::MemoryFormat::ChannelsLast3d)
   );
@@ -411,35 +391,6 @@ inline at::MemoryFormat miopen_conv_suggest_memory_format(const at::Tensor& inpu
     (weight_memory_format == at::MemoryFormat::ChannelsLast3d)
   );
   if (can_use_miopen_channels_last_3d) {
-    return at::MemoryFormat::ChannelsLast3d;
-  }
-
-  return at::MemoryFormat::Contiguous;
-}
-
-inline at::MemoryFormat hipdnn_conv_suggest_memory_format(const at::Tensor& input, const at::Tensor& weight) {
-  if (input.scalar_type() == at::kDouble ||
-      weight.scalar_type() == at::kDouble) {
-    return at::MemoryFormat::Contiguous;
-  }
-
-  auto input_memory_format = input.suggest_memory_format();
-  auto weight_memory_format = weight.suggest_memory_format();
-  auto weight_ndim = weight.ndimension();
-
-  bool can_use_channels_last_2d = (weight_ndim == 4) && (
-    (input_memory_format  == at::MemoryFormat::ChannelsLast) ||
-    (weight_memory_format == at::MemoryFormat::ChannelsLast)
-  );
-  if (can_use_channels_last_2d) {
-    return at::MemoryFormat::ChannelsLast;
-  }
-
-  bool can_use_channels_last_3d = (weight_ndim == 5) && (
-    (input_memory_format  == at::MemoryFormat::ChannelsLast3d) ||
-    (weight_memory_format == at::MemoryFormat::ChannelsLast3d)
-  );
-  if (can_use_channels_last_3d) {
     return at::MemoryFormat::ChannelsLast3d;
   }
 
@@ -519,8 +470,14 @@ inline bool mps_conv_use_channels_last(const at::Tensor& input, const at::Tensor
     return false;
   }
 
+  // Use exact-match so a tensor whose strides merely *look* like channels-last
+  // (e.g. a channel-slice of a channels-last tensor) is not misclassified --
+  // MPS reads raw buffers assuming packed NHWC, which would be incorrect for
+  // such views. exact_match also correctly excludes degenerate 1x1 weights
+  // whose NCHW-contiguous strides happen to also satisfy is_contiguous(CL).
+  // See https://github.com/pytorch/pytorch/issues/180984
   auto is_channel_last = [](const at::Tensor& t) {
-    auto fmt = t.suggest_memory_format();
+    auto fmt = t.suggest_memory_format(/*channels_last_strides_exact_match=*/true);
     return fmt == at::MemoryFormat::ChannelsLast || fmt == at::MemoryFormat::ChannelsLast3d;
   };
   return is_channel_last(input) || is_channel_last(weight);

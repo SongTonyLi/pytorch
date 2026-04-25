@@ -62,8 +62,10 @@ from .variables import (
     DictBuiltinVariable,
     FunctionalCallVariable,
     FunctorchHigherOrderVariable,
+    GetAttrBuiltinVariable,
     InspectSignatureVariable,
     IterBuiltinVariable,
+    ListBuiltinVariable,
     LocalGeneratorFunctionVariable,
     LocalGeneratorObjectVariable,
     NestedUserFunctionVariable,
@@ -191,6 +193,7 @@ manual_torch_name_rule_map: dict[
     "torch._C._group_tensors_by_device_and_dtype": TorchInGraphFunctionVariable,
     "torch.to_dlpack": SkipFunctionVariable,
     "torch._check": TorchInGraphFunctionVariable,
+    "torch._dynamo.decorators.override_optimization_hint": TorchInGraphFunctionVariable,
     # We graph break on RNG state setters or getters like
     # `torch.get_rng_state`, `torch.set_rng_state`, and
     # `torch.Generator.manual_seed`. These functions are not aten
@@ -340,6 +343,13 @@ manual_torch_name_rule_map: dict[
     "torch._C._functorch.unwrap_if_dead": TorchInGraphFunctionVariable,
     "torch._functorch.predispatch._vmap_increment_nesting": TorchInGraphFunctionVariable,
     "torch._functorch.predispatch._vmap_decrement_nesting": TorchInGraphFunctionVariable,
+    "torch._functorch.predispatch._jvp_increment_nesting": TorchInGraphFunctionVariable,
+    "torch._functorch.predispatch._jvp_decrement_nesting": TorchInGraphFunctionVariable,
+    "torch._functorch.predispatch._unwrap_for_grad": TorchInGraphFunctionVariable,
+    "torch._functorch.predispatch._make_dual": TorchInGraphFunctionVariable,
+    "torch._functorch.predispatch._unpack_dual": TorchInGraphFunctionVariable,
+    "torch._functorch.predispatch._enter_dual_level": TorchInGraphFunctionVariable,
+    "torch._functorch.predispatch._exit_dual_level": TorchInGraphFunctionVariable,
     # everything else
     "torch._functorch.pyfunctorch.coerce_cinterpreter": TorchInGraphFunctionVariable,
     "torch._higher_order_ops.triton_kernel_wrap.do_prune_configs": UserFunctionVariable,
@@ -1447,12 +1457,9 @@ torch_c_binding_in_graph_functions = dict.fromkeys(
         "torch._C.parse_ir",
         "torch._C.parse_schema",
         "torch._C.parse_type_comment",
-        "torch._C.read_vitals",
         "torch._C.set_autocast_cache_enabled",
         "torch._C.set_autocast_enabled",
-        "torch._C.set_vital",
         "torch._C.unify_type_list",
-        "torch._C.vitals_enabled",
         "torch._C.wait",
         "torch._cast_Byte",
         "torch._cast_Char",
@@ -2417,6 +2424,13 @@ torch_non_c_binding_in_graph_functions = dict.fromkeys(
         "torch._functorch.predispatch._vmap_decrement_nesting",
         "torch._functorch.predispatch._add_batch_dim",
         "torch._functorch.predispatch._remove_batch_dim",
+        "torch._functorch.predispatch._jvp_increment_nesting",
+        "torch._functorch.predispatch._jvp_decrement_nesting",
+        "torch._functorch.predispatch._unwrap_for_grad",
+        "torch._functorch.predispatch._make_dual",
+        "torch._functorch.predispatch._unpack_dual",
+        "torch._functorch.predispatch._enter_dual_level",
+        "torch._functorch.predispatch._exit_dual_level",
         "torch._guards.compile_context",
         "torch._guards.detect_fake_mode",
         "torch._guards.tracing",
@@ -3341,6 +3355,7 @@ def is_numpy_type_info(obj: Any) -> bool:
 BUILTIN_SKIPLIST = (
     abc,
     copy,
+    importlib,
     random,
     linecache,
 )
@@ -3836,6 +3851,7 @@ we don't want to inline the lower level function call (e.g, f3) by default.
 _force_inline_flag = False
 
 
+# pyrefly: ignore [deprecated]
 @contextlib.contextmanager
 def _force_inline() -> Iterator[None]:
     """
@@ -3999,7 +4015,12 @@ def is_torch(filename: str) -> bool:
 Main entry point for looking up the trace rule (the Dynamo variable) for a given callable object.
 """
 
-BUILTIN_CALLABLES = {dict: DictBuiltinVariable, iter: IterBuiltinVariable}
+BUILTIN_CALLABLES = {
+    dict: DictBuiltinVariable,
+    getattr: GetAttrBuiltinVariable,
+    iter: IterBuiltinVariable,
+    list: ListBuiltinVariable,
+}
 
 
 def lookup_callable(obj: Callable[..., Any]) -> type[VariableTracker] | None:
