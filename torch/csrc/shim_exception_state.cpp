@@ -1,6 +1,11 @@
 #include <torch/csrc/inductor/aoti_torch/c/macros.h>
+#include <torch/csrc/shim_exception_state.h>
 #include <string>
+
+// Thread local storage for the most recent exception's message and backtrace.
 thread_local std::string torch_exception_what;
+
+// Thread local storage for the most recent exception's message.
 thread_local std::string torch_exception_what_without_backtrace;
 
 // Default to printing the exception since that was the historical behaviour.
