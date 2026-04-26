@@ -35,16 +35,58 @@ typedef int (*nn_compute_source_index_fn_t)(const float, int, int);
 // nearest_neighbor_exact_bw_compute_source_index
 typedef int (*nn_bw_compute_source_index_fn_t)(const float, int, int);
 
-// On ROCm/HIP, gridDim.{x,y,z} * blockDim.{x,y,z} must be < 2^32 per dimension
-// (the HSA AQL dispatch packet stores global work sizes as uint32_t).
-// For large spatial outputs, the host-side launch code clamps grid dimensions
-// on ROCm so the product stays below UINT32_MAX.  This kernel uses grid-stride
-// loops on X, Y, and Z so that a clamped grid still covers the full output.
-
 // see NOTE [ Nearest neighbor upsampling kernel implementation ]
 template <typename scalar_t, nn_compute_source_index_fn_t nn_compute_source_index_fn>
 C10_LAUNCH_BOUNDS_1(1024)
 __global__ void upsample_nearest2d_out_frame(
+    const scalar_t* idata,
+    scalar_t* odata,
+    const size_t nc,
+    const size_t height1,
+    const size_t width1,
+    const size_t height2,
+    const size_t width2,
+    float height_scale,
+    float width_scale) {
+  size_t nc_iter = threadIdx.z + blockIdx.z * blockDim.z;
+  int64_t w2 = ((int64_t) threadIdx.x) + blockIdx.x * blockDim.x;
+  int64_t h2 = threadIdx.y + blockIdx.y * blockDim.y;
+
+  if (w2 >= width2 || h2 >= height2) {
+    return;
+  }
+
+  int64_t nc_stride = ((int64_t) blockDim.z) * gridDim.z;
+
+  const size_t h1 = height1 == height2
+      ? h2
+      : nn_compute_source_index_fn(height_scale, h2, height1);
+  const size_t w1 = width1 == width2
+      ? w2
+      : nn_compute_source_index_fn(width_scale, w2, width1);
+
+  size_t src_index = (nc_iter * height1 + h1) * width1 + w1;
+  size_t src_index_stride = nc_stride * width1 * height1;
+  size_t dst_index = (nc_iter * height2 + h2) * width2 + w2;
+  size_t dst_index_stride = nc_stride * width2 * height2;
+
+  // iterating over
+  while (nc_iter < nc) {
+    odata[dst_index] = idata[src_index];
+    dst_index += dst_index_stride;
+    src_index += src_index_stride;
+    nc_iter += nc_stride;
+  }
+}
+
+// ROCm fallback for oversized spatial launches.  HIP/HSA stores the effective
+// global size as uint32_t per dimension, so very large outputs may require
+// host-side grid clamping.  This kernel is intentionally separate from the
+// normal NCHW kernel so ordinary shapes keep the original one-pass instruction
+// stream and do not pay grid-stride loop overhead.
+template <typename scalar_t, nn_compute_source_index_fn_t nn_compute_source_index_fn>
+C10_LAUNCH_BOUNDS_1(1024)
+__global__ void upsample_nearest2d_out_frame_grid_stride(
     const scalar_t* idata,
     scalar_t* odata,
     const size_t nc,
@@ -103,22 +145,52 @@ __global__ void upsample_nearest2d_nhwc_out_frame(
     float width_scale,
     const size_t out_numel) {
 
-    // Grid-stride loop to handle the case where the grid is clamped
-    // to satisfy HIP's gridDim.x * blockDim.x < 2^32 constraint.
-    for (int64_t index = static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
-         static_cast<int64_t>(threadIdx.x);
-        index < static_cast<int64_t>(out_numel);
-        index += static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x)) {
+    const int64_t index = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
 
-      const auto c = index % channels;
-      const auto w2 = (index / channels) % width2;
-      const auto h2 = (index / channels / width2) % height2;
-      const auto n = index / channels / width2 / height2;
+    if (index < out_numel) {
+    const auto c = index % channels;
+    const auto w2 = (index / channels) % width2;
+    const auto h2 = (index / channels / width2) % height2;
+    const auto n = index / channels / width2 / height2;
 
-      const size_t h1 = height1 == height2 ? h2 : nn_compute_source_index_fn(height_scale, h2, height1);
-      const size_t w1 = width1 == width2 ? w2 : nn_compute_source_index_fn(width_scale, w2, width1);
+    const size_t h1 = height1 == height2 ? h2 : nn_compute_source_index_fn(height_scale, h2, height1);
+    const size_t w1 = width1 == width2 ? w2 : nn_compute_source_index_fn(width_scale, w2, width1);
 
-      odata[index] = idata[idx_cl(n, h1, w1, c, height1, width1, channels)];
+    odata[index] = idata[idx_cl(n, h1, w1, c, height1, width1, channels)];
+  }
+}
+
+// ROCm fallback for oversized channels-last launches.  Normal NHWC launches use
+// the original one-element-per-thread kernel above; only a clamped grid uses
+// this grid-stride variant.
+template <typename scalar_t, nn_compute_source_index_fn_t nn_compute_source_index_fn>
+C10_LAUNCH_BOUNDS_1(1024)
+__global__ void upsample_nearest2d_nhwc_out_frame_grid_stride(
+    const scalar_t* idata,
+    scalar_t* odata,
+    const size_t channels,
+    const size_t height1,
+    const size_t width1,
+    const size_t height2,
+    const size_t width2,
+    float height_scale,
+    float width_scale,
+    const size_t out_numel) {
+
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+       static_cast<int64_t>(threadIdx.x);
+      index < static_cast<int64_t>(out_numel);
+      index += static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x)) {
+
+    const auto c = index % channels;
+    const auto w2 = (index / channels) % width2;
+    const auto h2 = (index / channels / width2) % height2;
+    const auto n = index / channels / width2 / height2;
+
+    const size_t h1 = height1 == height2 ? h2 : nn_compute_source_index_fn(height_scale, h2, height1);
+    const size_t w1 = width1 == width2 ? w2 : nn_compute_source_index_fn(width_scale, w2, width1);
+
+    odata[index] = idata[idx_cl(n, h1, w1, c, height1, width1, channels)];
   }
 }
 
@@ -298,23 +370,43 @@ static void upsample_nearest2d_out_cuda_template(
     const int64_t num_kernels = output.numel();
     const int64_t num_threads = std::min(at::cuda::getCurrentDeviceProperties()->maxThreadsPerBlock, 1024);
 
-    int64_t grid = ceil_div(num_kernels, num_threads);
+    const int64_t grid = ceil_div(num_kernels, num_threads);
 #ifdef USE_ROCM
-    // HIP does not support gridDim.x * blockDim.x >= 2^32.
-    // Clamp grid so that grid * num_threads stays below UINT32_MAX.
-    // The NHWC kernel must use a grid-stride loop to cover all elements.
-    {
-      constexpr int64_t kHipMaxGlobalWorkSize = 4294967295LL;  // UINT32_MAX
-      int64_t safe_max_grid = kHipMaxGlobalWorkSize / num_threads;
-      grid = std::min(grid, safe_max_grid);
-    }
+    // HIP does not support gridDim.x * blockDim.x >= 2^32.  Keep the original
+    // fast kernel for normal launches and switch to the grid-stride fallback
+    // only when the requested grid must be clamped.
+    constexpr int64_t kHipMaxGlobalWorkSize = 4294967295LL;  // UINT32_MAX
+    const int64_t safe_max_grid = kHipMaxGlobalWorkSize / num_threads;
+    const bool use_grid_stride = grid > safe_max_grid;
+    const unsigned int launch_grid =
+        static_cast<unsigned int>(use_grid_stride ? safe_max_grid : grid);
+#else
+    const int64_t launch_grid = grid;
 #endif
 
     AT_DISPATCH_FLOATING_TYPES_AND3(ScalarType::Half, ScalarType::BFloat16, ScalarType::Byte, input.scalar_type(), "upsample_nearest2d_nhwc_out_frame", [&] {
       const scalar_t* idata = input.const_data_ptr<scalar_t>();
       scalar_t* odata = output.mutable_data_ptr<scalar_t>();
+#ifdef USE_ROCM
+      if (use_grid_stride) {
+        upsample_nearest2d_nhwc_out_frame_grid_stride<scalar_t, nn_compute_source_index_fn>
+          <<<launch_grid, num_threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+            idata,
+            odata,
+            channels,
+            input_height,
+            input_width,
+            output_height,
+            output_width,
+            height_scale,
+            width_scale,
+            output.numel()
+        );
+      } else
+#endif
+      {
       upsample_nearest2d_nhwc_out_frame<scalar_t, nn_compute_source_index_fn>
-        <<<grid, num_threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        <<<launch_grid, num_threads, 0, at::cuda::getCurrentCUDAStream()>>>(
           idata,
           odata,
           channels,
@@ -326,6 +418,7 @@ static void upsample_nearest2d_out_cuda_template(
           width_scale,
           output.numel()
       );
+      }
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     });
   }
@@ -355,29 +448,41 @@ static void upsample_nearest2d_out_cuda_template(
         maxThreadsDim[2], std::min<int>(nc, max_threads / block_x / block_y));
     const dim3 block(block_x, block_y, block_z);
 
+#ifdef USE_ROCM
+    // HIP/HSA records the dispatched global work size for each dimension in a
+    // uint32_t AQL packet field.  Compute requested grids in int64_t and avoid
+    // maxGridSize[2] on ROCm because the uint32_t maximum may appear as -1
+    // through signed cudaDeviceProp storage, which becomes 0xffffffff in dim3.
+    //
+    // Only X/Y clamping needs the slower grid-stride fallback.  The original
+    // NCHW kernel already strides over the NC dimension, so a clamped Z grid
+    // remains correct without changing the per-thread spatial fast path.
+    auto safe_hip_grid_dim = [](int64_t requested, int block_dim) -> unsigned int {
+      TORCH_INTERNAL_ASSERT(block_dim > 0, "upsample_nearest2d: block_dim must be positive");
+      constexpr int64_t kHipMaxGlobalWorkSize = 4294967295LL;  // UINT32_MAX
+      const int64_t max_grid = kHipMaxGlobalWorkSize / static_cast<int64_t>(block_dim);
+      const int64_t clamped = std::max<int64_t>(
+          1, std::min<int64_t>(requested, max_grid));
+      return static_cast<unsigned int>(clamped);
+    };
+
+    const int64_t requested_grid_x = static_cast<int64_t>(ceil_div(output_width, block_x));
+    const int64_t requested_grid_y = static_cast<int64_t>(ceil_div(output_height, block_y));
+    const int64_t requested_grid_z = static_cast<int64_t>(
+        ceil_div(nc, static_cast<int64_t>(block_z) * 4));
+    const unsigned int grid_x = safe_hip_grid_dim(requested_grid_x, block_x);
+    const unsigned int grid_y = safe_hip_grid_dim(requested_grid_y, block_y);
+    const unsigned int grid_z = safe_hip_grid_dim(requested_grid_z, block_z);
+    const bool use_grid_stride =
+        requested_grid_x != static_cast<int64_t>(grid_x) ||
+        requested_grid_y != static_cast<int64_t>(grid_y);
+    const dim3 grid(grid_x, grid_y, grid_z);
+#else
     int grid_x = ceil_div(output_width, block_x);
     int grid_y = ceil_div(output_height, block_y);
     int grid_z = std::min<int>(
         maxGridSize[2], ceil_div(nc, (int64_t) block_z * 4));
 
-#ifdef USE_ROCM
-    // HIP does not support gridDim.{x,y,z} * blockDim.{x,y,z} >= 2^32 per dimension.
-    // Clamp each grid dimension so the product stays below UINT32_MAX.
-    // The kernel uses block-stride loops on X and Y (and already had a stride
-    // loop on Z), so the clamped grid still covers the full output tensor.
-    //
-    // Use int64_t arithmetic to avoid undefined behavior: when block_{dim}
-    // is 1, UINT32_MAX / 1 = 4294967295 which overflows signed int.
-    {
-      constexpr int64_t kHipMaxGlobalWorkSize = 4294967295LL;  // UINT32_MAX
-      grid_x = std::min(grid_x, static_cast<int>(std::min(
-          kHipMaxGlobalWorkSize / block_x, static_cast<int64_t>(INT_MAX))));
-      grid_y = std::min(grid_y, static_cast<int>(std::min(
-          kHipMaxGlobalWorkSize / block_y, static_cast<int64_t>(INT_MAX))));
-      grid_z = std::min(grid_z, static_cast<int>(std::min(
-          kHipMaxGlobalWorkSize / block_z, static_cast<int64_t>(INT_MAX))));
-    }
-#else
     // On CUDA, the original check is sufficient — CUDA's maxGridSize[0] is
     // 2^31-1 and there is no per-dimension product-overflow constraint.
     // Error out on cases where grid_x & grid_y exceeds limit of launch config, as
@@ -388,9 +493,9 @@ static void upsample_nearest2d_out_cuda_template(
     TORCH_CHECK(
         grid_x <= maxGridSize[0] && grid_y <= maxGridSize[1],
         "input tensor has spatial dimension larger than the kernel capacity");
-#endif
 
     const dim3 grid(grid_x, grid_y, grid_z);
+#endif
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     AT_DISPATCH_FLOATING_TYPES_AND3(ScalarType::Half, ScalarType::BFloat16, ScalarType::Byte, input.scalar_type(), "upsample_nearest2d_out_frame", [&] {
           using accscalar_t = at::acc_type<scalar_t, true>;
@@ -398,6 +503,22 @@ static void upsample_nearest2d_out_cuda_template(
           auto idata = input.const_data_ptr<scalar_t>();
           auto odata = output_c.mutable_data_ptr<scalar_t>();
 
+#ifdef USE_ROCM
+          if (use_grid_stride) {
+            upsample_nearest2d_out_frame_grid_stride<scalar_t, nn_compute_source_index_fn>
+                <<<grid, block, 0, stream>>>(
+                    idata,
+                    odata,
+                    nc,
+                    input_height,
+                    input_width,
+                    output_height,
+                    output_width,
+                    height_scale,
+                    width_scale);
+          } else
+#endif
+          {
           upsample_nearest2d_out_frame<scalar_t, nn_compute_source_index_fn>
               <<<grid, block, 0, stream>>>(
                   idata,
@@ -409,6 +530,7 @@ static void upsample_nearest2d_out_cuda_template(
                   output_width,
                   height_scale,
                   width_scale);
+          }
           C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
 
