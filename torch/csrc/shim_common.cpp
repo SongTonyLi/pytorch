@@ -1,7 +1,6 @@
 #include <c10/core/Device.h>
 #include <c10/core/DispatchKey.h>
 #include <c10/util/Exception.h>
-#include <shim_exception_state.h>
 #include <torch/csrc/inductor/aoti_runtime/utils.h>
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch/csrc/inductor/aoti_torch/tensor_converter.h>
@@ -743,6 +742,7 @@ AOTI_TORCH_EXPORT AOTITorchError torch_library_def_with_tags(
     reinterpret_cast<torch::Library*>(self)->def(
         torch::schema(schema), tag_vec, torch::_RegisterOrVerify::REGISTER);
   });
+}
 
 AOTI_TORCH_EXPORT const char* torch_exception_get_what() {
   return torch_exception_state_get_what().c_str();

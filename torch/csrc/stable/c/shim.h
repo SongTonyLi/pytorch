@@ -222,8 +222,6 @@ AOTI_TORCH_EXPORT AOTITorchError torch_library_def_with_tags(
     int32_t num_tags);
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 
-// !!! TODO: THis must be 2.13, but it's test scaffolding is missing atm.
-#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_12_0
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
 
 /// Retrieve a pointer to the string that holds the most recent exception's
