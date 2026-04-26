@@ -1346,10 +1346,13 @@ def conv(
     )
     input_ = new_kwargs["input"]
     weight = new_kwargs["weight"]
+    # Internal passes such as Inductor freezing may run fake propagation over
+    # folded convs that do not need to match eager's public input checks.
     if (
         func is aten.convolution.default
         and input_.fake_device.type == "cuda"
         and input_.dtype != weight.dtype
+        and not fake_mode.allow_non_fake_inputs
     ):
         raise RuntimeError(
             f"Input type ({input_.dtype}) and weight type "
