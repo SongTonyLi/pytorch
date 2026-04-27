@@ -4729,6 +4729,13 @@ class TestEpilogueFusionStaticAnalysis(TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+        # TEMP-VERIFY: force-enable disabled flaky test so this PR's CI runs it.
+        # Revert before merge.
+        from torch.testing._internal import common_utils as _cu
+
+        for _k in list(_cu.disabled_tests_dict):
+            if "test_template_epilogue_fusion_extra_reads" in _k:
+                _cu.disabled_tests_dict.pop(_k, None)
         cls._stack = contextlib.ExitStack()
         cls._stack.enter_context(
             config.patch(
