@@ -8352,7 +8352,7 @@ def control_deps_op_lowering(additional_deps, subgraph_fn, *args):
     """
     # Realize all additional dependencies
     dep_names = []
-    for dep in additional_deps:
+    for dep in pytree.tree_leaves(additional_deps):
         if not isinstance(dep, IRNode):
             continue
 
