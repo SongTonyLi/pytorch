@@ -7158,6 +7158,118 @@ class AOTInductorTestsTemplate:
         with self.assertRaises(AssertionError):
             torch.testing.assert_close(new_expected, new_output, atol=1e-3, rtol=1e-3)
 
+    def test_update_constant_buffer_from_cpu(self):
+        if self.device != GPU_TYPE:
+            raise unittest.SkipTest("requires GPU")
+
+        class Model(torch.nn.Module):
+            def __init__(self, n, k, device):
+                super().__init__()
+                self.weight = torch.randn(n, k, device=device)
+                self.bias = torch.randn(n, device=device)
+
+            def forward(self, a):
+                return torch.nn.functional.linear(a, self.weight, self.bias)
+
+        M, N, K = 8, 6, 16
+        model = Model(N, K, self.device)
+        a = torch.randn(M, K, device=self.device)
+        example_inputs = (a,)
+        with torch.no_grad(), config.patch({"always_keep_tensor_constants": True}):
+            so_path = AOTIRunnerUtil.legacy_compile(
+                model=model,
+                example_inputs=example_inputs,
+            )
+
+        runner = AOTIRunnerUtil.legacy_load_runner(self.device, so_path)
+
+        def runner_call(*args, **kwargs):
+            import torch.fx._pytree as fx_pytree
+
+            call_spec = runner.get_call_spec()
+            in_spec = pytree.treespec_loads(call_spec[0])
+            out_spec = pytree.treespec_loads(call_spec[1])
+            flat_inputs = fx_pytree.tree_flatten_spec((args, kwargs), in_spec)
+            flat_inputs = [x for x in flat_inputs if isinstance(x, torch.Tensor)]
+            flat_outputs = runner.run(flat_inputs)
+            return pytree.tree_unflatten(flat_outputs, out_spec)
+
+        test_inputs = torch.randn(M, K, device=self.device)
+
+        # Pass CPU tensors to a GPU model via update_constant_buffer_from_cpu;
+        # they should be silently copied to the model's device.
+        new_weight_cpu = torch.randn(N, K, device="cpu")
+        new_bias_cpu = torch.randn(N, device="cpu")
+        new_weights_cpu = {
+            "L__self___weight": new_weight_cpu,
+            "L__self___bias": new_bias_cpu,
+        }
+        runner.update_constant_buffer_from_cpu(new_weights_cpu, False, False)
+
+        new_expected = torch.nn.functional.linear(
+            test_inputs,
+            new_weight_cpu.to(self.device),
+            new_bias_cpu.to(self.device),
+        )
+        new_output = runner_call(test_inputs)
+        self.assertEqual(new_expected, new_output)
+
+        # Sanity check: the original update_constant_buffer still rejects CPU
+        # tensors for a GPU model (existing behavior is unchanged). The
+        # underlying error string ("mixed device constants") is printed to
+        # stderr by the .so; the host-side wrapper surfaces a generic
+        # RuntimeError, so we just assert that one is raised.
+        with self.assertRaises(RuntimeError):
+            runner.update_constant_buffer(new_weights_cpu, False, False)
+
+    def test_load_constants_allow_h2d_copy(self):
+        # End-to-end check that AOTICompiledModel.load_constants(allow_h2d_copy=True)
+        # accepts a CPU state_dict for a non-CPU model, the way a typical user
+        # would after torch.load(..., map_location="cpu").
+        if self.device != GPU_TYPE:
+            raise unittest.SkipTest("requires GPU")
+
+        class Model(torch.nn.Module):
+            def __init__(self, n, k, device):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.randn(n, k, device=device))
+
+            def forward(self, a):
+                return torch.nn.functional.linear(a, self.weight)
+
+        M, N, K = 8, 6, 16
+        model = Model(N, K, self.device)
+        a = torch.randn(M, K, device=self.device)
+        example_inputs = (a,)
+
+        package_path = AOTIRunnerUtil.compile(model, example_inputs)
+        compiled = torch._inductor.aoti_load_package(package_path)
+
+        (weight_fqn,) = compiled.get_constant_fqns()
+        cpu_state_dict = {weight_fqn: torch.randn(N, K, device="cpu")}
+        compiled.load_constants(
+            cpu_state_dict, check_full_update=True, allow_h2d_copy=True
+        )
+
+        test_inputs = torch.randn(M, K, device=self.device)
+        expected = torch.nn.functional.linear(
+            test_inputs, cpu_state_dict[weight_fqn].to(self.device)
+        )
+        self.assertEqual(expected, compiled(test_inputs))
+
+        # Without allow_h2d_copy, the same call must error out.
+        with self.assertRaises(RuntimeError):
+            compiled.load_constants(cpu_state_dict, check_full_update=True)
+
+        # allow_h2d_copy + user_managed must be rejected up-front.
+        with self.assertRaises(RuntimeError):
+            compiled.load_constants(
+                cpu_state_dict,
+                check_full_update=True,
+                user_managed=True,
+                allow_h2d_copy=True,
+            )
+
     def test_cond_share_predicate(self):
         class Model(torch.nn.Module):
             def forward(self, predicate, x):

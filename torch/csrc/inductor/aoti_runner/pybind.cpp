@@ -47,6 +47,14 @@ void initAOTIRunnerBindings(PyObject* module) {
           py::arg("validate_full_updates"),
           py::arg("user_managed") = false)
       .def(
+          "update_constant_buffer_from_cpu",
+          static_cast<void (AOTIModelContainerRunnerCpu::*)(
+              std::unordered_map<std::string, at::Tensor>&, bool, bool)>(
+              &AOTIModelContainerRunnerCpu::update_constant_buffer_from_cpu),
+          py::arg("tensor_map"),
+          py::arg("use_inactive"),
+          py::arg("validate_full_updates"))
+      .def(
           "swap_constant_buffer",
           &AOTIModelContainerRunnerCpu::swap_constant_buffer)
       .def(
@@ -97,6 +105,14 @@ void initAOTIRunnerBindings(PyObject* module) {
           py::arg("validate_full_updates"),
           py::arg("user_managed") = false)
       .def(
+          "update_constant_buffer_from_cpu",
+          static_cast<void (AOTIModelContainerRunnerCuda::*)(
+              std::unordered_map<std::string, at::Tensor>&, bool, bool)>(
+              &AOTIModelContainerRunnerCuda::update_constant_buffer_from_cpu),
+          py::arg("tensor_map"),
+          py::arg("use_inactive"),
+          py::arg("validate_full_updates"))
+      .def(
           "swap_constant_buffer",
           &AOTIModelContainerRunnerCuda::swap_constant_buffer)
       .def(
@@ -141,6 +157,14 @@ void initAOTIRunnerBindings(PyObject* module) {
           py::arg("validate_full_updates"),
           py::arg("user_managed") = false)
       .def(
+          "update_constant_buffer_from_cpu",
+          static_cast<void (AOTIModelContainerRunnerXpu::*)(
+              std::unordered_map<std::string, at::Tensor>&, bool, bool)>(
+              &AOTIModelContainerRunnerXpu::update_constant_buffer_from_cpu),
+          py::arg("tensor_map"),
+          py::arg("use_inactive"),
+          py::arg("validate_full_updates"))
+      .def(
           "swap_constant_buffer",
           &AOTIModelContainerRunnerXpu::swap_constant_buffer)
       .def(
@@ -179,6 +203,14 @@ void initAOTIRunnerBindings(PyObject* module) {
           py::arg("use_inactive"),
           py::arg("validate_full_updates"),
           py::arg("user_managed") = false)
+      .def(
+          "update_constant_buffer_from_cpu",
+          static_cast<void (AOTIModelContainerRunnerMps::*)(
+              std::unordered_map<std::string, at::Tensor>&, bool, bool)>(
+              &AOTIModelContainerRunnerMps::update_constant_buffer_from_cpu),
+          py::arg("tensor_map"),
+          py::arg("use_inactive"),
+          py::arg("validate_full_updates"))
       .def(
           "swap_constant_buffer",
           &AOTIModelContainerRunnerMps::swap_constant_buffer)
