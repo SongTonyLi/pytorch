@@ -57,6 +57,7 @@ from torch._inductor.codegen.common import DataTypePropagation, OptimizationCont
 from torch._inductor.test_case import TestCase as InductorTestCase
 from torch._inductor.utils import (
     add_scheduler_init_hook,
+    get_code,
     run_and_get_code,
     run_and_get_cpp_code,
     run_and_get_kernels,
@@ -5055,6 +5056,23 @@ class CommonTemplate:
             fn,
             (torch.randn([10]),),
         )
+
+    @requires_gpu()
+    def test_to_copy_fp64_to_no_fp64_device(self):
+        # See https://github.com/pytorch/pytorch/issues/180664
+        # When the target device does not support fp64, _to_copy should
+        # convert dtype on CPU before the device transfer so that no fp64
+        # buffer is allocated on the target device.
+        def fn(x):
+            return x.to(dtype=torch.float32, device=GPU_TYPE)
+
+        x = torch.randn(4, 4, dtype=torch.float64, device="cpu")
+        with patch("torch._inductor.utils.device_supports_fp64", return_value=False):
+            code = "\n".join(get_code(torch.compile(fn), x))
+
+        # The Triton kernel should not have any fp64 pointer arguments.
+        # Without the fix, the kernel signature would contain '*fp64'.
+        self.assertNotIn("'*fp64'", code)
 
     @requires_gpu()
     @xfail_if_triton_cpu
