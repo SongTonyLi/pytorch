@@ -168,7 +168,7 @@ class ManualOverlapScheduler(OverlapScheduler):
             insert_overlap_deps=insert_overlap_deps,
             compute_overlap_multipler=0.0,
             max_coll_distance=0,
-            custom_runtime_estimation=None,
+            custom_runtime_estimation=lambda node, size: 0.0,
             collective_estimator="analytical",
             max_memory_increase_gb=None,
             max_memory_increase_ratio=None,
