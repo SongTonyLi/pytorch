@@ -419,3 +419,8 @@ tqdm>=4.66.0
 
 aiohttp==3.13.4
 #Description: required for torch.distributed.debug
+
+# spmd_types is installed with --no-deps in install_python.sh / install_conda.sh
+# to avoid pulling in a PyPI torch as a transitive dependency.
+#Description: SPMD type system for distributed training
+#test that import: test_fully_shard_spmd_types.py, test_local_map.py

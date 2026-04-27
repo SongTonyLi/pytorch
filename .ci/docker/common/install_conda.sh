@@ -87,6 +87,7 @@ if [ -n "$ANACONDA_PYTHON_VERSION" ]; then
 
   # Install some other packages, including those needed for Python test reporting
   pip_install -r /opt/conda/requirements-ci.txt
+  pip_install --no-deps spmd_types==0.2.0
 
   if [ -n "$DOCS" ]; then
     apt-get update
