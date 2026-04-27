@@ -7292,6 +7292,53 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         self.assertEqual(exp_out, opt_out)
         self.assertEqual(cnt.frame_count, exp_frame_count)
 
+    def test_describe_backend(self):
+        from torch._dynamo.guards import describe_backend
+
+        self.assertEqual(describe_backend(None), "None")
+
+        # Regular function
+        def my_backend(gm, example_inputs):
+            return gm
+
+        desc = describe_backend(my_backend)
+        self.assertIn("my_backend", desc)
+        self.assertIn("defined at", desc)
+        self.assertIn("id=", desc)
+
+        # functools.partial wrapping
+        partial_backend = functools.partial(my_backend)
+        desc = describe_backend(partial_backend)
+        self.assertIn("functools.partial wrapping", desc)
+        self.assertIn("my_backend", desc)
+
+        # _TorchCompileWrapper
+        wrapper = torch._TorchCompileWrapper(
+            "eager", mode=None, options=None, dynamic=True
+        )
+        desc = describe_backend(wrapper)
+        self.assertIn("_TorchCompileWrapper", desc)
+        self.assertIn("compiler='eager'", desc)
+        self.assertIn("dynamic=True", desc)
+        self.assertIn("id=", desc)
+
+        # _TorchCompileWrapper with kwargs
+        wrapper_kwargs = torch._TorchCompileWrapper(
+            "eager", mode="reduce-overhead", options=None, dynamic=False
+        )
+        desc = describe_backend(wrapper_kwargs)
+        self.assertIn("kwargs=", desc)
+        self.assertIn("reduce-overhead", desc)
+
+        # Callable object without __qualname__ or __name__
+        class CallableBackend:
+            def __call__(self, gm, example_inputs):
+                return gm
+
+        desc = describe_backend(CallableBackend())
+        self.assertIn("CallableBackend", desc)
+        self.assertIn("id=", desc)
+
     def test_backend_match_guard(self):
         x = torch.randn([3, 4])
 
