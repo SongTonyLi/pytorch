@@ -1,9 +1,9 @@
-name: linux-binary-test-rocm
+name: linux-binary-container-test
 
-# Reusable workflow that runs the ROCm binary test (setup-rocm, GPU device
-# passthrough, ECR docker pull, test-pytorch-binary, teardown-rocm). Called
-# from the matrix-driven manywheel-test-rocm job in
-# generated-linux-binary-manywheel-nightly.yml.
+# Container-directive variant of _binary-test-linux.yml. GitHub Actions
+# launches the test container via the `container:` directive instead of the
+# legacy docker-in-docker dance. Test scripts in .ci/* read PYTORCH_ROOT,
+# PYTORCH_FINAL_PACKAGE_DIR exactly as before.
 
 on:
   workflow_call:
@@ -11,6 +11,24 @@ on:
       build_name:
         required: true
         type: string
+      build_environment:
+        required: true
+        type: string
+      runner_prefix:
+        required: false
+        default: ""
+        type: string
+      runs_on:
+        required: true
+        type: string
+      timeout-minutes:
+        required: false
+        default: 240
+        type: number
+      ALPINE_IMAGE:
+        required: false
+        type: string
+        default: "308535385114.dkr.ecr.us-east-1.amazonaws.com/tool/alpine"
       PYTORCH_ROOT:
         required: true
         type: string
@@ -21,7 +39,7 @@ on:
         required: true
         type: string
       GPU_ARCH_VERSION:
-        required: true
+        required: false
         type: string
       GPU_ARCH_TYPE:
         required: true
@@ -35,29 +53,27 @@ on:
       DESIRED_PYTHON:
         required: false
         type: string
-      runs_on:
+      LIBTORCH_CONFIG:
         required: false
         type: string
-        default: linux.rocm.gpu.gfx942.1
-      timeout-minutes:
+      LIBTORCH_VARIANT:
         required: false
-        type: number
-        default: 240
+        type: string
+    secrets:
+      github-token:
+        required: true
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  # ROCm test runs the test container via the GHA `container:` directive.
-  # ROCm device passthrough flags go through container.options. Same shape
-  # as the standard _binary-container-test-linux.yml.
   test:
-    runs-on: ${{ inputs.runs_on }}
+    runs-on: ${{ inputs.runner_prefix }}${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     container:
       image: ${{ inputs.DOCKER_IMAGE }}:${{ inputs.DOCKER_IMAGE_TAG_PREFIX }}
-      options: --device=/dev/mem --device=/dev/kfd --device=/dev/dri --group-add video --group-add daemon
+      options: ${{ inputs.GPU_ARCH_TYPE == 'cuda' && '--gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video' || ' ' }}
     env:
       PYTORCH_ROOT: ${{ github.workspace }}
       PACKAGE_TYPE: ${{ inputs.PACKAGE_TYPE }}
@@ -65,18 +81,17 @@ jobs:
       GPU_ARCH_VERSION: ${{ inputs.GPU_ARCH_VERSION }}
       GPU_ARCH_TYPE: ${{ inputs.GPU_ARCH_TYPE }}
       SKIP_ALL_TESTS: 1
+      LIBTORCH_CONFIG: ${{ inputs.LIBTORCH_CONFIG }}
+      LIBTORCH_VARIANT: ${{ inputs.LIBTORCH_VARIANT }}
       DESIRED_PYTHON: ${{ inputs.DESIRED_PYTHON }}
-      ALPINE_IMAGE: "308535385114.dkr.ecr.us-east-1.amazonaws.com/tool/alpine"
+      ALPINE_IMAGE: ${{ inputs.ALPINE_IMAGE }}
       AWS_DEFAULT_REGION: us-east-1
       BINARY_ENV_FILE: /tmp/env
-      BUILD_ENVIRONMENT: linux-binary-manywheel
+      BUILD_ENVIRONMENT: ${{ inputs.build_environment }}
+      GITHUB_TOKEN: ${{ secrets.github-token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
       PYTORCH_FINAL_PACKAGE_DIR: ${{ runner.temp }}/artifacts
       SHA1: ${{ github.event.pull_request.head.sha || github.sha }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      GPU_FLAG: "--device=/dev/mem --device=/dev/kfd --device=/dev/dri --group-add video --group-add daemon"
-    permissions:
-      id-token: write
-      contents: read
     steps:
       - name: Configure git safe directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -85,14 +100,9 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
           submodules: recursive
           show-progress: false
-
-      - uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
-        name: Download Build Artifacts
-        with:
-          name: ${{ inputs.build_name }}
-          path: "${{ runner.temp }}/artifacts/"
 
       - name: Make test env permanent
         shell: bash
@@ -106,6 +116,8 @@ jobs:
             echo "GPU_ARCH_TYPE=${GPU_ARCH_TYPE}"
             echo "DOCKER_IMAGE=${{ inputs.DOCKER_IMAGE }}:${{ inputs.DOCKER_IMAGE_TAG_PREFIX }}"
             echo "SKIP_ALL_TESTS=${SKIP_ALL_TESTS}"
+            echo "LIBTORCH_CONFIG=${LIBTORCH_CONFIG}"
+            echo "LIBTORCH_VARIANT=${LIBTORCH_VARIANT}"
             echo "DESIRED_PYTHON=${DESIRED_PYTHON}"
             echo "ALPINE_IMAGE=${ALPINE_IMAGE}"
             echo "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}"
@@ -116,6 +128,12 @@ jobs:
             echo "PYTORCH_FINAL_PACKAGE_DIR=${PYTORCH_FINAL_PACKAGE_DIR}"
             echo "SHA1=${SHA1}"
           } >> "${GITHUB_ENV}"
+          mkdir -p "$PYTORCH_FINAL_PACKAGE_DIR"
+
+      - uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
+        with:
+          name: ${{ inputs.build_name }}
+          path: "${{ runner.temp }}/artifacts/"
 
       - name: Populate binary env
         shell: bash
