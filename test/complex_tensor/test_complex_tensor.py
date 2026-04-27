@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from torch._subclasses.complex_tensor._core import ComplexTensor
 
 
 # Support both when imported from elsewhere or directly as a file
@@ -141,6 +142,21 @@ class TestComplexTensor(TestCase):
     @ops(force_test_op_db, allowed_dtypes=list(COMPLEX_DTYPES))
     def test_maybe_error(self, device, dtype, op: OpInfo):
         self.check_consistency(device, dtype, op, Variant.Op)
+
+    def test_view_as_real_neg_flag(self, device):
+        x = torch.asarray(1 + 3j, device=device)
+
+        def f(arr):
+            neg_arr = torch._neg_view(arr)
+            return torch.view_as_real(neg_arr).is_neg()
+
+        def expected():
+            return f(x)
+
+        def actual():
+            return f(ComplexTensor.from_interleaved(x))
+
+        self.assertSameResult(expected, actual)
 
 
 @unMarkDynamoStrictTest
