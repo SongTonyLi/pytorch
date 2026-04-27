@@ -43,4 +43,11 @@ if _HAS_SPMD_TYPES:
         V,
     )
 else:
-    pass
+    import contextlib
+
+    def has_local_type(tensor):  # type: ignore[misc]
+        return False
+
+    @contextlib.contextmanager
+    def no_typecheck():  # type: ignore[misc]
+        yield

@@ -17,6 +17,7 @@ from torch.distributed._composable_state import (
 )
 from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.fsdp._common_utils import collect_grad_tensors
+from torch.distributed.spmd_types import no_typecheck
 from torch.distributed.utils import _apply_to_tensors, _to_kwargs
 
 from ._fsdp_api import MixedPrecisionPolicy
@@ -268,6 +269,7 @@ class FSDPState(_State):
                         fsdp_param_group._module_fqn = module_fqn
 
     @_dynamo_disable
+    @no_typecheck()
     def _pre_forward(
         self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -303,6 +305,7 @@ class FSDPState(_State):
         return args, kwargs
 
     @_dynamo_disable
+    @no_typecheck()
     def _post_forward(self, module: nn.Module, input: Any, output: Any) -> Any:
         # When composing with module-hook-based activation checkpointing, the
         # post-backward hook is responsible for the reshard
@@ -331,6 +334,7 @@ class FSDPState(_State):
         return output
 
     @_dynamo_disable
+    @no_typecheck()
     def _pre_backward(self, grad: torch.Tensor) -> torch.Tensor:
         self._training_state = TrainingState.PRE_BACKWARD
         self._register_root_post_backward_final_callback()
