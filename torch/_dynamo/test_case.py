@@ -124,14 +124,8 @@ class TestCase(TorchTestCase):
     # graph break tests
 
 
-class CPythonTestCase(TestCase):
-    """
-    Test class for CPython tests located in "test/dynamo/CPython/Py_version/*".
-
-    This class enables specific features that are disabled by default, such as
-    tracing through unittest methods.
-    """
-
+# If the code doesn't involve tensor, uses this TestCase as it is faster to trace
+class PythonTestCase(TestCase):
     _stack: contextlib.ExitStack
     dynamo_strict_nopython = True
 
@@ -174,6 +168,29 @@ class CPythonTestCase(TestCase):
     fail = unittest.TestCase.fail
     failureException = unittest.TestCase.failureException
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._stack = contextlib.ExitStack()  # type: ignore[attr-defined]
+        cls._stack.enter_context(  # type: ignore[attr-defined]
+            config.patch(
+                enable_trace_unittest=True,
+            ),
+        )
+
+    # pyrefly: ignore [implicit-any]
+    def wrap_with_policy(self, method_name: str, policy: Callable) -> None:
+        pass
+
+
+class CPythonTestCase(PythonTestCase):
+    """
+    Test class for CPython tests located in "test/dynamo/CPython/Py_version/*".
+
+    This class enables specific features that are disabled by default, such as
+    tracing through unittest methods.
+    """
+
     def compile_fn(
         self,
         fn: Callable[..., Any],
@@ -201,11 +218,6 @@ class CPythonTestCase(TestCase):
         return f"CPython{py_ver}-{test_file}-{suffix}"
 
     @classmethod
-    def tearDownClass(cls) -> None:
-        cls._stack.close()
-        super().tearDownClass()
-
-    @classmethod
     def setUpClass(cls) -> None:
         # Skip test if python versions doesn't match
         prefix = os.path.join("dynamo", "cpython") + os.path.sep
@@ -227,12 +239,6 @@ class CPythonTestCase(TestCase):
             )
 
         super().setUpClass()
-        cls._stack = contextlib.ExitStack()  # type: ignore[attr-defined]
-        cls._stack.enter_context(  # type: ignore[attr-defined]
-            config.patch(
-                enable_trace_unittest=True,
-            ),
-        )
 
     # pyrefly: ignore [implicit-any]
     def wrap_with_policy(self, method_name: str, policy: Callable) -> None:
