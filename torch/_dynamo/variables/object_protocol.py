@@ -317,3 +317,31 @@ def generic_float(tx: "InstructionTranslator", obj: VariableTracker) -> Variable
         f"float() argument must be a string or a real number, "
         f"not '{obj.python_type_name()}'",
     )
+
+
+def generic_hash_impl(
+    tx: "InstructionTranslator", obj: VariableTracker
+) -> tuple[int, bool]:
+    """Internal API: compute hash as (value, is_fake).
+
+    Dispatches to the VT's hash_impl.  Called by generic_hash (which wraps
+    the result in a VT), container hash_impls (which propagate is_fake),
+    and HashableTracker (which just needs the int).
+    """
+    return obj.hash_impl(tx)
+
+
+def generic_hash(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTracker:
+    """User-facing API: mirrors PyObject_Hash, returns a VariableTracker.
+
+    https://github.com/python/cpython/blob/e76aa128fe/Objects/object.c#L1101-L1115
+
+    Wraps the result in ConstantVariable or FakeIdVariable depending on
+    whether the hash depends on a sourceless object's identity.
+    """
+    from .constant import ConstantVariable, FakeIdVariable
+
+    h, is_fake = generic_hash_impl(tx, obj)
+    if is_fake:
+        return FakeIdVariable(h)
+    return ConstantVariable.create(h)
