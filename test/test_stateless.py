@@ -6,9 +6,11 @@ import re
 import subprocess
 import sys
 import unittest
+from copy import deepcopy
 
 import torch
 import torch.nn.utils.stateless as stateless
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.testing._internal.common_cuda import TEST_MULTIGPU
 from torch.testing._internal.common_utils import run_tests, TestCase, parametrize, instantiate_parametrized_tests, \
     subtest
@@ -35,6 +37,16 @@ class MockTiedModule(torch.nn.Module):
 
     def forward(self, x):
         return self.l1(x) + self.tied_bias + self.buffer + self.tied_buffer
+
+
+class OptimizerModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.l1 = torch.nn.Linear(2, 2)
+        self.l2 = torch.nn.Linear(2, 1)
+
+    def forward(self, x):
+        return self.l2(self.l1(x))
 
 
 class TestStatelessFunctionalAPI(TestCase):
@@ -715,6 +727,306 @@ class TestStatelessFunctionalAPI(TestCase):
             out = functional_call(mod, a, torch.ones(()), strict=True)
         self.assertTrue(not hasattr(mod, 'extra'))
 
+
+class TestStatelessOptimizerReparam(TestCase):
+    class _TestException(Exception):
+        pass
+
+    def _init_optimizer(self):
+        module = OptimizerModule()
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": [module.l1.weight, module.l1.bias],
+                    "lr": 0.1,
+                    "weight_decay": 0.01,
+                },
+                {
+                    "params": [module.l2.weight, module.l2.bias],
+                    "lr": 0.01,
+                    "weight_decay": 0.0,
+                },
+            ]
+        )
+        x = torch.randn(4, 2)
+        loss = module(x).sum()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        return module, optimizer
+
+    def _make_reparam_inputs(self):
+        module, optimizer = self._init_optimizer()
+        parameters = {
+            name: torch.randn_like(param, requires_grad=param.requires_grad)
+            for name, param in module.named_parameters()
+        }
+        optimizer_state_dict = deepcopy(optimizer.state_dict())
+        return module, optimizer, parameters, optimizer_state_dict
+
+    def _assert_optimizer_restored(
+        self,
+        optimizer,
+        state_before,
+        state_dict_before,
+        params_before,
+        group_metadata_before,
+    ):
+        self.assertTrue(optimizer.state is state_before)
+        self.assertEqual(optimizer.state_dict(), state_dict_before)
+        for group, params, metadata in zip(
+            optimizer.param_groups, params_before, group_metadata_before, strict=True
+        ):
+            self.assertTrue(group["params"] is params)
+            self.assertEqual(
+                {key: value for key, value in group.items() if key != "params"},
+                metadata,
+            )
+            for current_param, original_param in zip(group["params"], params, strict=True):
+                self.assertTrue(current_param is original_param)
+
+    def test_reparametrize_optimizer_rejects_uninitialized_state(self):
+        module = OptimizerModule()
+        initialized_optimizer = torch.optim.AdamW(module.parameters(), lr=0.1)
+        optimizer_state_dict = deepcopy(initialized_optimizer.state_dict())
+        uninitialized_optimizer = torch.optim.AdamW(module.parameters(), lr=0.1)
+        parameters = {
+            name: torch.randn_like(param, requires_grad=param.requires_grad)
+            for name, param in module.named_parameters()
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            re.escape("_reparametrize_optimizer requires initialized optimizer state."),
+        ):
+            with stateless._reparametrize_optimizer(
+                uninitialized_optimizer, parameters, optimizer_state_dict
+            ):
+                pass
+
+    def test_reparametrize_optimizer_rejects_non_raw_state(self):
+        _, optimizer, parameters, _ = self._make_reparam_inputs()
+        invalid_optimizer_state_dict = deepcopy(optimizer.state_dict())
+        invalid_optimizer_state_dict["state"] = {"l1.weight": {}}
+        invalid_optimizer_state_dict["param_groups"][0]["params"] = [
+            "l1.weight",
+            "l1.bias",
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            re.escape(
+                "_reparametrize_optimizer requires optimizer.state_dict()-style "
+                "param_groups[*]['params'] entries keyed by packed parameter ids."
+            ),
+        ):
+            with stateless._reparametrize_optimizer(
+                optimizer, parameters, invalid_optimizer_state_dict
+            ):
+                pass
+
+    def test_reparametrize_optimizer_rejects_bad_top_level_shape(self):
+        _, optimizer, parameters, _ = self._make_reparam_inputs()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            re.escape(
+                "_reparametrize_optimizer requires an optimizer.state_dict()-style "
+                "state_dict with 'state' and 'param_groups' entries."
+            ),
+        ):
+            with stateless._reparametrize_optimizer(
+                optimizer,
+                parameters,
+                {"state": [], "param_groups": {}},
+            ):
+                pass
+
+    def test_reparametrize_optimizer_rejects_param_group_count_mismatch(self):
+        _, optimizer, parameters, optimizer_state_dict = self._make_reparam_inputs()
+        optimizer_state_dict["param_groups"].pop()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            re.escape(
+                "optimizer_state_dict has a different number of parameter groups than "
+                "the live optimizer."
+            ),
+        ):
+            with stateless._reparametrize_optimizer(
+                optimizer, parameters, optimizer_state_dict
+            ):
+                pass
+
+    def test_reparametrize_optimizer_rejects_param_group_size_mismatch(self):
+        _, optimizer, parameters, optimizer_state_dict = self._make_reparam_inputs()
+        optimizer_state_dict["param_groups"][0]["params"].pop()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            re.escape(
+                "optimizer_state_dict param group does not match the size of "
+                "live optimizer param group 0."
+            ),
+        ):
+            with stateless._reparametrize_optimizer(
+                optimizer, parameters, optimizer_state_dict
+            ):
+                pass
+
+    def test_reparametrize_optimizer_rejects_non_dict_param_state(self):
+        _, optimizer, parameters, optimizer_state_dict = self._make_reparam_inputs()
+        first_param_id = optimizer_state_dict["param_groups"][0]["params"][0]
+        optimizer_state_dict["state"][first_param_id] = torch.tensor(1.0)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            re.escape(
+                "_reparametrize_optimizer requires per-parameter optimizer "
+                "state entries to be dictionaries."
+            ),
+        ):
+            with stateless._reparametrize_optimizer(
+                optimizer, parameters, optimizer_state_dict
+            ):
+                pass
+
+    def test_reparametrize_optimizer_rejects_non_param_state(self):
+        _, optimizer, parameters, optimizer_state_dict = self._make_reparam_inputs()
+        optimizer_state_dict["state"]["global_step"] = 42
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            re.escape(
+                "_reparametrize_optimizer requires optimizer.state_dict()-style state "
+                "to contain only per-parameter entries keyed by packed parameter ids."
+            ),
+        ):
+            with stateless._reparametrize_optimizer(
+                optimizer, parameters, optimizer_state_dict
+            ):
+                pass
+
+    def test_reparametrize_optimizer_restores_after_exception(self):
+        _, optimizer, parameters, optimizer_state_dict = self._make_reparam_inputs()
+        state_before = optimizer.state
+        state_dict_before = deepcopy(optimizer.state_dict())
+        params_before = [group["params"] for group in optimizer.param_groups]
+        group_metadata_before = [
+            {key: value for key, value in group.items() if key != "params"}
+            for group in optimizer.param_groups
+        ]
+        try:
+            with stateless._reparametrize_optimizer(
+                optimizer, parameters, optimizer_state_dict
+            ):
+                self.assertTrue(optimizer.state is not state_before)
+                self.assertTrue(
+                    optimizer.param_groups[0]["params"] is not params_before[0]
+                )
+                first_param = optimizer.param_groups[0]["params"][0]
+                optimizer.state[first_param]["step"] = torch.tensor(123.0)
+                optimizer.state[first_param]["exp_avg"].add_(1)
+                optimizer.param_groups[0]["lr"] = 5.0
+                raise self._TestException
+        except self._TestException:
+            self._assert_optimizer_restored(
+                optimizer,
+                state_before,
+                state_dict_before,
+                params_before,
+                group_metadata_before,
+            )
+
+    def test_reparametrize_optimizer_reflects_state_mutations(self):
+        _, optimizer, parameters, optimizer_state_dict = self._make_reparam_inputs()
+        state_before = optimizer.state
+        state_dict_before = deepcopy(optimizer.state_dict())
+        params_before = [group["params"] for group in optimizer.param_groups]
+        group_metadata_before = [
+            {key: value for key, value in group.items() if key != "params"}
+            for group in optimizer.param_groups
+        ]
+
+        with stateless._reparametrize_optimizer(
+            optimizer, parameters, optimizer_state_dict
+        ):
+            first_param = optimizer.param_groups[0]["params"][0]
+            optimizer.state[first_param]["step"] = torch.tensor(123.0)
+            optimizer.state[first_param]["exp_avg"].add_(1)
+            optimizer.param_groups[0]["lr"] = 5.0
+
+        self._assert_optimizer_restored(
+            optimizer,
+            state_before,
+            state_dict_before,
+            params_before,
+            group_metadata_before,
+        )
+        first_param_id = optimizer_state_dict["param_groups"][0]["params"][0]
+        self.assertEqual(
+            optimizer_state_dict["state"][first_param_id]["step"],
+            torch.tensor(123.0),
+        )
+
+    def test_make_fx_reparametrize_module_and_optimizer_records_aten_ops(self):
+        module = OptimizerModule()
+        optimizer = torch.optim.SGD(module.parameters(), lr=0.1, momentum=0.9)
+        x = torch.randn(4, 2)
+        loss = module(x).sum()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        parameters = {
+            name: torch.randn_like(param, requires_grad=param.requires_grad)
+            for name, param in module.named_parameters()
+        }
+        optimizer_state_dict = deepcopy(optimizer.state_dict())
+
+        def f(state, x):
+            params, optimizer_state = state
+            with stateless._reparametrize_module(module, params):
+                with stateless._reparametrize_optimizer(
+                    optimizer, params, optimizer_state
+                ):
+                    y = module(x)
+                    for param in module.parameters():
+                        param.grad = torch.ones_like(param)
+                    optimizer.step()
+                    return y
+
+        gm = make_fx(f)((parameters, optimizer_state_dict), x)
+        self.assertExpectedInline(
+            gm.code.strip(),
+            """\
+def forward(self, state, x):
+    state_1, state_2, state_3, state_4, state_5, state_6, state_7, state_8, state_9, state_10, state_11, state_12, state_13, state_14, state_15, state_16, state_17, state_18, state_19, state_20, state_21, x_1, = fx_pytree.tree_flatten_spec([state, x], self._in_spec)
+    t = torch.ops.aten.t.default(state_1)
+    addmm = torch.ops.aten.addmm.default(state_2, x_1, t);  x_1 = t = None
+    t_1 = torch.ops.aten.t.default(state_3)
+    addmm_1 = torch.ops.aten.addmm.default(state_4, addmm, t_1);  addmm = t_1 = None
+    ones_like = torch.ops.aten.ones_like.default(state_1, pin_memory = False)
+    ones_like_1 = torch.ops.aten.ones_like.default(state_2, pin_memory = False)
+    ones_like_2 = torch.ops.aten.ones_like.default(state_3, pin_memory = False)
+    ones_like_3 = torch.ops.aten.ones_like.default(state_4, pin_memory = False)
+    _record_function_enter_new = torch.ops.profiler._record_function_enter_new.default('Optimizer.step#SGD.step')
+    mul_ = torch.ops.aten.mul_.Tensor(state_5, 0.9);  state_5 = None
+    add_ = torch.ops.aten.add_.Tensor(mul_, ones_like);  mul_ = ones_like = None
+    add__1 = torch.ops.aten.add_.Tensor(state_1, add_, alpha = -0.1);  state_1 = add_ = add__1 = None
+    mul__1 = torch.ops.aten.mul_.Tensor(state_6, 0.9);  state_6 = None
+    add__2 = torch.ops.aten.add_.Tensor(mul__1, ones_like_1);  mul__1 = ones_like_1 = None
+    add__3 = torch.ops.aten.add_.Tensor(state_2, add__2, alpha = -0.1);  state_2 = add__2 = add__3 = None
+    mul__2 = torch.ops.aten.mul_.Tensor(state_7, 0.9);  state_7 = None
+    add__4 = torch.ops.aten.add_.Tensor(mul__2, ones_like_2);  mul__2 = ones_like_2 = None
+    add__5 = torch.ops.aten.add_.Tensor(state_3, add__4, alpha = -0.1);  state_3 = add__4 = add__5 = None
+    mul__3 = torch.ops.aten.mul_.Tensor(state_8, 0.9);  state_8 = None
+    add__6 = torch.ops.aten.add_.Tensor(mul__3, ones_like_3);  mul__3 = ones_like_3 = None
+    add__7 = torch.ops.aten.add_.Tensor(state_4, add__6, alpha = -0.1);  state_4 = add__6 = add__7 = None
+    _record_function_exit = torch.ops.profiler._record_function_exit._RecordFunction(_record_function_enter_new);  _record_function_enter_new = _record_function_exit = None
+    return pytree.tree_unflatten([addmm_1], self._out_spec)""",
+        )
+
     @parametrize("functional_call", [
         subtest(torch.func.functional_call, "torch_func"),
         subtest(stateless.functional_call, "stateless")
@@ -921,6 +1233,9 @@ class TestPythonOptimizeMode(TestCase):
 
 instantiate_parametrized_tests(
     TestStatelessFunctionalAPI,
+)
+instantiate_parametrized_tests(
+    TestStatelessOptimizerReparam,
 )
 
 if __name__ == '__main__':
