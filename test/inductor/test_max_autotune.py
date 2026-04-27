@@ -4826,23 +4826,6 @@ class TestEpilogueFusionStaticAnalysis(TestCase):
                 )
             )
 
-        from torch._inductor.scheduler import Scheduler
-
-        common_patches.extend(
-            [
-                mock.patch.object(
-                    Scheduler,
-                    "benchmark_fused_nodes",
-                    return_value=(1.0, ""),
-                ),
-                mock.patch.object(
-                    Scheduler,
-                    "benchmark_codegened_module",
-                    return_value=(0.5, ""),
-                ),
-            ]
-        )
-
         with contextlib.ExitStack() as stack:
             for p in common_patches:
                 stack.enter_context(p)
@@ -5105,6 +5088,8 @@ class TestEpilogueFusionStaticAnalysis(TestCase):
                 aten_time=aten_time,
                 triton_time=triton_time,
                 epilogue_runtime=epilogue_runtime,
+                mock_fused_n_regs=32,
+                mock_n_spills=0,
             ):
                 compiled_fn = torch.compile(fn)
                 _, code = run_and_get_code(compiled_fn, x, w, bias, scale)
