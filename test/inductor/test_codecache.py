@@ -140,6 +140,8 @@ class MyModelConv2d(torch.nn.Module):
 
 
 class TestPyCodeCache(TestCase):
+    _share_triton_cache = False
+
     def test_linemaps_empty(self):
         src = """import torch"""
         (key, path) = PyCodeCache.write(src, "")
@@ -251,6 +253,7 @@ class TestPyCodeCache(TestCase):
 @instantiate_parametrized_tests
 class TestFxGraphCache(TestCase):
     device_type = GPU_TYPE
+    _share_triton_cache = False
 
     def setUp(self):
         super().setUp()
@@ -1891,6 +1894,8 @@ class TestFxGraphCache(TestCase):
 
 @instantiate_parametrized_tests
 class TestStandaloneCompile(TestCase):
+    _share_triton_cache = False
+
     def setUp(self):
         super().setUp()
         counters.clear()
@@ -2542,6 +2547,8 @@ class TestCustomPartitionerFn(CustomPartitionerFn):
 
 
 class TestFxGraphCacheHashing(TestCase):
+    _share_triton_cache = False
+
     def test_parameter_constants(self):
         """
         Test the hashing of parameter constants.
@@ -3163,6 +3170,8 @@ class TestFxGraphCacheHashing(TestCase):
 
 
 class TestCudaCompileCommand(TestCase):
+    _share_triton_cache = False
+
     @requires_cuda_and_triton
     def test_cuda_compile_command(self):
         cmd_no_extra_args: str = cuda_compile_command(
@@ -3205,6 +3214,7 @@ class TestCudaCompileCommand(TestCase):
 
 @instantiate_parametrized_tests
 class TestAutotuneCache(TestCase):
+    _share_triton_cache = False
     device_type = GPU_TYPE
 
     def setUp(self):
@@ -3435,6 +3445,7 @@ class TestAutotuneCache(TestCase):
 
 
 class TestRemoteAOTAutogradCache(TestCase):
+    _share_triton_cache = False
     @requires_gpu()
     @unittest.skipIf(not HAS_XPU_AND_TRITON and not SM80OrLater, "Requires SM80+")
     @config.patch({"fx_graph_cache": False})
@@ -3525,6 +3536,7 @@ class TestRemoteAOTAutogradCache(TestCase):
 
 
 class TestUtils(TestCase):
+    _share_triton_cache = False
     @config.patch({"fx_graph_remote_cache": False})
     def test_fresh_cache(self):
         def fn(x, y):
@@ -3567,6 +3579,7 @@ class TestUtils(TestCase):
 
 
 class TestCompilationEventLogging(TestCase):
+    _share_triton_cache = False
     def reset(self):
         DynamoCache.clear()
         PrecompileContext.clear()
@@ -3757,6 +3770,8 @@ class TestCompilationEventLogging(TestCase):
 
 
 class TestAutotuneCacheExtraOptions(TestCase):
+    _share_triton_cache = False
+
     """
     Unit tests for extra_options preservation in _load_cached_autotuning().
 
