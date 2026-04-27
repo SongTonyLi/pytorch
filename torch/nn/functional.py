@@ -1,5 +1,6 @@
 """Functional interface."""
 
+import dataclasses
 import importlib
 import math
 import warnings
@@ -3653,6 +3654,130 @@ def binary_cross_entropy_with_logits(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class LinearCrossEntropyOptions:
+    """Options for controlling chunking strategy in linear cross
+    entropy operation.
+    """
+
+    grad_inplace: bool = False
+    """When True, backward will use inplace multiplication to compute
+    the gradients to save extra storage space but
+    torch.autograd.gradcheck will likely fail and the operation will
+    not be composite compliant.  Default is False.
+    """
+
+    batch_chunk_size: int | None = None
+    """Chunk size along the batches dimension. The specified value may
+    be overridden by the computed value from chunking method. By
+    default, the chunk size is maximal.
+
+    Warning: Specifying a smaller chunk size reduces memory consumption
+    but it may also reduce the performance of the operation.
+    """
+
+    chunking_method: str | None = None
+    """A method for computing chunk sizes. By default, the chunk sizes
+    are maximal.
+
+    The following methods are supported for computing chunk sizes:
+
+    - "liger" - use the same heuristics as in
+        `<https://github.com/linkedin/Liger-Kernel>`__ for computing
+        the batch chunk size. Specified ``batch_chunk_size`` will be
+        overridden.
+    - "liger:<factor>" - same as "liger" with initial
+        ``batch_chunk_size`` multiplied by ``2 ** factor``. If
+        ``factor == -1`` and ``acc_policy == "TTTTTA"``, the memory
+        usage will be comparable to one when using Liger-Kernel.
+    """
+
+    acc_policy: str = "TTTTTA"
+    """Define a finer control of using acc_dtype in internal variables.
+
+    acc_policy must be a string with length 6 and it must contain only
+    characters 'T' or 'A' that encode the usage of dtype or acc_dtype,
+    respectively. The 6 characters in the acc_policy value correspond
+    to the following internal variables:
+    - output - accumulator of operator output
+    - grad_input - accumulator of input gradients
+    - grad_linear_weight - accumulator of linear_weight gradients
+    - X - a workspace for softmax computations
+    - GX - a workspace for grad_input computations
+    - GL - a workspace for grad_linear_weight computations
+
+    For instance, acc_policy == "AATAAA" means that all internal
+    variables except grad_linear_weight use acc_dtype dtype while the
+    latter uses dtype.
+
+    Warning: this is an experimental feature that may change or be
+    removed in future.
+    """
+
+    acc_dtype: torch.dtype | None = None
+    """A dtype used in accumulating computation results to increase
+    numerical accuracy. By default, use the same as input dtype.
+    """
+
+    def adjust(self, num_batches, in_features, num_classes, dtype):
+        """Adjust options to input sizes and dtype.
+
+        Return a new LinearCrossEntropyOptions object with default
+        chunk sizes adjusted to the actual input sizes.
+        """
+        if self.batch_chunk_size is None:
+            batch_chunk_size = num_batches
+        else:
+            batch_chunk_size = min(self.batch_chunk_size, num_batches)
+
+        if self.chunking_method is not None:
+            if self.chunking_method.startswith("liger"):
+                # A modified heuristics used in
+                # liger_kernel.transformers.LigerFusedLinearCrossEntropyLoss:
+                #
+                #   next_pow_of_2(cdiv(num_batches, cdiv(num_classes, in_features))) * 2 ** factor
+                #
+                # where factor is integer.
+                if ":" in self.chunking_method:
+                    factor = int(self.chunking_method.split(":", 1)[1])
+                else:
+                    factor = 0
+                batch_chunk_size = (
+                    1
+                    << (
+                        -(num_batches // (num_classes // -in_features)) - 1
+                    ).bit_length()
+                )
+                if factor < 0:
+                    batch_chunk_size = max(batch_chunk_size // 2**-factor, 1)
+                else:
+                    batch_chunk_size *= 2**factor
+
+                if (
+                    self.batch_chunk_size is not None
+                    and self.batch_chunk_size != batch_chunk_size
+                ):
+                    warnings.warn(
+                        f"Specified batch_chunk_size (={self.batch_chunk_size}) is different"
+                        f" from one (={batch_chunk_size}) computed using chunking method"
+                        f" ('{self.chunking_method}'). Using the latter.",
+                        stacklevel=2,
+                    )
+            else:
+                raise ValueError(
+                    f"Unknown chunking method: '{self.chunking_method}'."
+                    " Supported methods: 'liger' or None."
+                )
+
+        if self.acc_dtype is None:
+            acc_dtype = dtype
+        else:
+            acc_dtype = self.acc_dtype
+        return dataclasses.replace(
+            self, batch_chunk_size=batch_chunk_size, acc_dtype=acc_dtype
+        )
+
+
 def linear_cross_entropy(
     input: Tensor,
     linear_weight: Tensor,
@@ -3662,6 +3787,7 @@ def linear_cross_entropy(
     reduction: str = "mean",
     ignore_index: int | None = None,
     label_smoothing: float = 0.0,
+    options: LinearCrossEntropyOptions | None = None,
 ) -> Tensor:
     r"""Compute the cross entropy loss between inputs, transformed linearly, and target.
 
@@ -3709,7 +3835,13 @@ def linear_cross_entropy(
             Architecture for Computer Vision
             <https://arxiv.org/abs/1512.00567>`__.
             Default: :math:`0.0`.
-
+        options (LinearCrossEntropyOptions, optional): Specify
+            chunking strategy options, see
+            :class:`~torch.nn.functional.LinearCrossEntropyOptions`
+            for more details. Enabling chunking will decrease the
+            memory usage.  To enable reference implementation of
+            ``linear_cross_entropy``, use `options=None`. Default:
+            ``None``.
     Shape:
         - Input: :math:`(in_features)` or :math:`(N, in\_features)`.
         - Linear weight: :math:`(C, in\_features)` or :math:`(C, d_1,
@@ -3750,6 +3882,7 @@ def linear_cross_entropy(
             reduction=reduction,
             ignore_index=ignore_index,
             label_smoothing=label_smoothing,
+            options=options,
         )
     if input.dim() < 1 or input.dim() > 2:
         raise RuntimeError(
@@ -3790,6 +3923,55 @@ def linear_cross_entropy(
         linear_weight = linear_weight.reshape(
             (math.prod(out_features, start=num_classes), in_features)
         )
+
+    if (
+        options is not None
+        and reduction in {"mean", "sum"}
+        and label_smoothing == 0.0
+        and target.dtype == torch.int64
+        and not out_features  # TODO: remove this, requires target reshape
+    ):
+        if input.dim() == 2:
+            num_batches = input.shape[0]
+            has_batches = True
+        else:
+            num_batches = 1
+            has_batches = False
+            input = input.unsqueeze(0)
+            target = target.unsqueeze(0)
+
+        if weight is None:
+            weight = torch.ones(
+                (num_classes,),
+                device=input.device,
+                dtype=input.dtype,
+                requires_grad=False,
+            )
+        options = options.adjust(num_batches, in_features, num_classes, input.dtype)
+
+        # global import results a likely circular import
+        import torch.nn._linear_cross_entropy as m
+
+        result = m.linear_cross_entropy_batch_chunking_cls(
+            input,
+            linear_weight,
+            target,
+            weight,
+            reduction,
+            ignore_index,
+            label_smoothing,
+            options.batch_chunk_size,
+            options.acc_policy,
+            options.acc_dtype,
+            options.grad_inplace,
+            input.requires_grad,
+            linear_weight.requires_grad,
+        )[0]
+
+        if not has_batches:
+            result = result.squeeze(0)
+        return result
+
     logits = linear(input, linear_weight)
     # recover logits shape that corresponds to the shape of specified
     # linear_weight:
