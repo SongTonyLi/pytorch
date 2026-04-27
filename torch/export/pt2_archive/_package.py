@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import pickle
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from torch._export.serde.serialize import (
     SerializedArtifact,
 )
 from torch._inductor.cpp_builder import normalize_path_separator
+from torch._library.opaque_object import is_opaque_value
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.export import ExportedProgram
 from torch.export._tree_utils import reorder_kwargs
@@ -493,7 +495,7 @@ def _package_constants(
 
     pickled_constants: list[tuple[str, torch.Tensor]] = []
     raw_constants: dict[str, tuple[torch.Tensor, TensorProperties]] = {}
-    custom_objects: list[tuple[str, torch._C.ScriptObject]] = []
+    custom_objects: list[tuple[str, Any]] = []
 
     # Categorize constants
     for constant_fqn, constant in exported_program.constants.items():
@@ -503,7 +505,9 @@ def _package_constants(
             else:
                 raw_constants[constant_fqn] = (constant, TensorProperties(constant))
 
-        elif isinstance(constant, torch._C.ScriptObject):
+        elif isinstance(constant, torch._C.ScriptObject) or is_opaque_value(
+            constant
+        ):
             custom_objects.append((constant_fqn, constant))
 
         else:
@@ -538,12 +542,15 @@ def _package_constants(
         tensor_idx,
     )
 
-    # Handle custom objects
+    # Handle custom objects (ScriptObject and opaque types)
     for constant_fqn, constant in custom_objects:
         path_name = f"{CUSTOM_OBJ_FILENAME_PREFIX}{custom_obj_idx}"
         archive_path = os.path.join(CONSTANTS_DIR, path_name)
-        custom_obj_bytes = torch._C._pickle_save(constant)
-        archive_writer.write_bytes(archive_path, custom_obj_bytes)
+        if isinstance(constant, torch._C.ScriptObject):
+            obj_bytes = torch._C._pickle_save(constant)
+        else:
+            obj_bytes = pickle.dumps(constant, protocol=pickle_protocol)
+        archive_writer.write_bytes(archive_path, obj_bytes)
 
         constants_config[constant_fqn] = schema.PayloadMeta(
             path_name=path_name,
@@ -955,7 +962,12 @@ def _load_constants(
                 constant_bytes = archive_reader.read_bytes(
                     os.path.join(CONSTANTS_DIR, path_name)
                 )
-                constants[constant_fqn] = torch._C._pickle_load_obj(constant_bytes)
+                try:
+                    constants[constant_fqn] = torch._C._pickle_load_obj(
+                        constant_bytes
+                    )
+                except Exception:
+                    constants[constant_fqn] = pickle.loads(constant_bytes)  # noqa: S301
 
             else:
                 raise RuntimeError(f"Unsupported constant type: {path_name}")
