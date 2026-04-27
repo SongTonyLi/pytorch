@@ -2833,7 +2833,7 @@ inline TensorCheck make_tensor_check(
 }
 
 struct RecordedTensorMetadata {
-  PyObject* tensor_ptr;
+  py::weakref tensor_weakref;
   TensorCheck check;
 };
 
@@ -3102,8 +3102,8 @@ class GuardManager {
 
   void stash_tensor_pointers(
       PyObject* value,
-      std::vector<PyObject*> tensor_pointers) {
-    _tensor_pointers[value] = tensor_pointers;
+      std::vector<py::weakref> tensor_pointers) {
+    _tensor_pointers[value] = std::move(tensor_pointers);
   }
 
   void stash_tensor_metadata(
@@ -3251,10 +3251,15 @@ class GuardManager {
       return true;
     }
     for (auto& recorded_tensor : it->second) {
-      if (!THPVariable_Check(recorded_tensor.tensor_ptr) ||
+      PyObject* tensor_ptr =
+          PyWeakref_GET_OBJECT(recorded_tensor.tensor_weakref.ptr());
+      if (tensor_ptr == Py_None) {
+        _disable_dict_tag_matching = true;
+        return false;
+      }
+      if (!THPVariable_Check(tensor_ptr) ||
           !recorded_tensor.check.check(
-              get_local_state(_root),
-              THPVariable_Unpack(recorded_tensor.tensor_ptr))) {
+              get_local_state(_root), THPVariable_Unpack(tensor_ptr))) {
         return false;
       }
     }
@@ -3264,8 +3269,13 @@ class GuardManager {
   bool check_no_tensor_aliasing_guards_fast(PyObject* value) {
     std::shared_ptr<RelationalGuard> no_tensor_aliasing_guard =
         get_no_tensor_aliasing_guard(_root);
-    for (auto* tensor_pointer : _tensor_pointers[value]) {
-      if (!no_tensor_aliasing_guard->check_nopybind(tensor_pointer)) {
+    for (auto& tensor_weakref : _tensor_pointers[value]) {
+      PyObject* tensor_ptr = PyWeakref_GET_OBJECT(tensor_weakref.ptr());
+      if (tensor_ptr == Py_None) {
+        _disable_dict_tag_matching = true;
+        return false;
+      }
+      if (!no_tensor_aliasing_guard->check_nopybind(tensor_ptr)) {
         return false;
       }
     }
@@ -3763,7 +3773,7 @@ class GuardManager {
   bool _disable_dict_tag_matching = false;
   std::unordered_map<PyObject*, std::vector<std::pair<PyObject*, uint64_t>>>
       _dict_pointers;
-  std::unordered_map<PyObject*, std::vector<PyObject*>> _tensor_pointers;
+  std::unordered_map<PyObject*, std::vector<py::weakref>> _tensor_pointers;
   std::unordered_map<PyObject*, std::vector<RecordedTensorMetadata>>
       _tensor_metadata_pointers;
   std::vector<WeakEntry> _tag_safe_entries;
@@ -4060,12 +4070,13 @@ class RootGuardManager : public GuardManager {
   }
 
   void record_tensor_pointer(PyObject* tensor_pointer) {
-    _recorded_tensor_pointers.push_back(tensor_pointer);
+    _recorded_tensor_pointers.push_back(
+        py::weakref(py::handle(tensor_pointer)));
   }
 
   void record_tensor_metadata(PyObject* tensor_pointer) {
     _recorded_tensor_metadata.push_back(RecordedTensorMetadata{
-        tensor_pointer,
+        py::weakref(py::handle(tensor_pointer)),
         make_tensor_check(_local_state, THPVariable_Unpack(tensor_pointer)),
     });
   }
@@ -4125,7 +4136,7 @@ class RootGuardManager : public GuardManager {
   bool _is_recording_dict_pointers{false};
   GuardManager* _current_tag_safe_root{nullptr};
   std::vector<std::pair<PyObject*, uint64_t>> _recorded_dict_pointers;
-  std::vector<PyObject*> _recorded_tensor_pointers;
+  std::vector<py::weakref> _recorded_tensor_pointers;
   std::vector<RecordedTensorMetadata> _recorded_tensor_metadata;
 };
 
