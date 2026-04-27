@@ -2567,7 +2567,6 @@ def _fix_katex_server_race(app):
     KaTeXServer.start_server_process = _start_with_retry
 
 
-
 def hide_edit_button_for_pages(app, pagename, templatename, context, doctree):
     if pagename.startswith("generated/"):
         context["theme_use_edit_page_button"] = False
