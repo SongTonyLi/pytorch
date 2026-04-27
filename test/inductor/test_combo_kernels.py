@@ -7,10 +7,14 @@ import re
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch._inductor
-from torch._inductor.utils import run_and_get_code
+from torch._inductor.memory import BufferInfo
+from torch._inductor.test_case import TestCase as InductorTestCase
+from torch._inductor.utils import fresh_cache, run_and_get_code
 from torch.testing import FileCheck
 from torch.testing._internal.common_cuda import SM90OrLater
 from torch.testing._internal.common_utils import (
@@ -62,6 +66,9 @@ class ComboKernelTests(TestCase):
                     "combo_kernels": True,
                     "benchmark_combo_kernel": False,
                     "combo_kernel_per_subkernel_blocks": self.combo_kernel_per_subkernel_blocks,
+                    "combo_kernel_max_distance": -1,
+                    "combo_kernel_peak_memory_threshold": None,
+                    "combo_kernel_peak_memory_pct_threshold": None,
                 }
             )
         )
@@ -740,6 +747,9 @@ class ComboKernelBenchmarkTests(TestCase):
                     "combo_kernels": True,
                     "benchmark_combo_kernel": True,
                     "combo_kernel_per_subkernel_blocks": self.combo_kernel_per_subkernel_blocks,
+                    "combo_kernel_max_distance": -1,
+                    "combo_kernel_peak_memory_threshold": None,
+                    "combo_kernel_peak_memory_pct_threshold": None,
                 }
             )
         )
@@ -895,6 +905,9 @@ class ComboKernelDynamicShapesTests(TestCase):
                     "combo_kernels": True,
                     "benchmark_combo_kernel": True,
                     "combo_kernel_per_subkernel_blocks": self.combo_kernel_per_subkernel_blocks,
+                    "combo_kernel_max_distance": -1,
+                    "combo_kernel_peak_memory_threshold": None,
+                    "combo_kernel_peak_memory_pct_threshold": None,
                 }
             )
         )
@@ -1185,6 +1198,9 @@ class ComboKernelPDLTests(TestCase):
                     "combo_kernels": True,
                     "benchmark_combo_kernel": False,
                     "triton.enable_pdl": True,
+                    "combo_kernel_max_distance": -1,
+                    "combo_kernel_peak_memory_threshold": None,
+                    "combo_kernel_peak_memory_pct_threshold": None,
                 }
             )
         )
@@ -1311,6 +1327,9 @@ class ComboKernelTestsMaxAutotune(TestCase):
                     "combo_kernel_per_subkernel_blocks": True,
                     "max_autotune": True,
                     "autotune_local_cache": False,
+                    "combo_kernel_max_distance": -1,
+                    "combo_kernel_peak_memory_threshold": None,
+                    "combo_kernel_peak_memory_pct_threshold": None,
                 }
             )
         )
@@ -1902,6 +1921,258 @@ class ComboKernelMetadataTests(TestCase):
         inps = [torch.rand(1024, device=GPU_TYPE) for _ in range(2)]
         code = self._combo_code(fn, inps)
         self.assertRegex(code, r"num_gb = \d*\.\d+")
+
+
+# Minimal scheduler doubles for direct _try_combo_with_memory_check tests.
+class _PeakMemFakeNode:
+    def __init__(self, name: str, deps=()) -> None:
+        self.name = name
+        self.scheduler = object()
+        self.unmet_dependencies = tuple(SimpleNamespace(name=dep) for dep in deps)
+
+    def get_name(self) -> str:
+        return self.name
+
+    def get_first_name(self) -> str:
+        return self.name
+
+    def get_buffer_names(self):
+        return ()
+
+
+class _PeakMemFakeBuffer:
+    def __init__(self, name: str, defining_op: _PeakMemFakeNode, succ_nodes) -> None:
+        self.name = name
+        self.defining_op = defining_op
+        self.mpi_buffer = SimpleNamespace(succ_nodes=succ_nodes)
+
+    def get_name(self) -> str:
+        return self.name
+
+
+class _PeakMemFakeFreeableInputBuffer:
+    pass
+
+
+class _PeakMemFakeScheduler:
+    def __init__(self, nodes, name_to_fused_node=None) -> None:
+        self.nodes = nodes
+        self.name_to_fused_node = (
+            {} if name_to_fused_node is None else name_to_fused_node
+        )
+
+    def topological_sort_schedule(self, nodes):
+        return nodes
+
+
+class ComboKernelPeakMemoryTests(InductorTestCase):
+    """Coverage for memory-aware combo-kernel acceptance and commit logic."""
+
+    def setUp(self):
+        super().setUp()
+        torch._inductor.metrics.reset()
+        self._test_stack = contextlib.ExitStack()
+        self._test_stack.enter_context(
+            torch._inductor.config.patch(
+                {
+                    "combo_kernels": True,
+                    "benchmark_combo_kernel": False,
+                    "combo_kernel_per_subkernel_blocks": True,
+                }
+            )
+        )
+
+    def tearDown(self):
+        self._test_stack.close()
+        torch._inductor.metrics.reset()
+        super().tearDown()
+
+    @staticmethod
+    def _thresholds(*, abs_thr=None, pct_thr=None, max_distance=-1):
+        return {
+            "combo_kernel_peak_memory_threshold": abs_thr,
+            "combo_kernel_peak_memory_pct_threshold": pct_thr,
+            "combo_kernel_max_distance": max_distance,
+        }
+
+    @staticmethod
+    def _make_wide_resnet_like():
+        """Build a WideResNet-like model."""
+
+        class Bottleneck(torch.nn.Module):
+            expansion = 4
+
+            def __init__(self, in_ch, mid_ch, stride=1, downsample=None):
+                super().__init__()
+                self.conv1 = torch.nn.Conv2d(in_ch, mid_ch, 1, bias=False)
+                self.bn1 = torch.nn.BatchNorm2d(mid_ch)
+                self.conv2 = torch.nn.Conv2d(
+                    mid_ch, mid_ch, 3, stride=stride, padding=1, bias=False
+                )
+                self.bn2 = torch.nn.BatchNorm2d(mid_ch)
+                self.conv3 = torch.nn.Conv2d(
+                    mid_ch, mid_ch * self.expansion, 1, bias=False
+                )
+                self.bn3 = torch.nn.BatchNorm2d(mid_ch * self.expansion)
+                self.relu = torch.nn.ReLU(inplace=True)
+                self.downsample = downsample
+
+            def forward(self, x):
+                identity = x
+                out = self.relu(self.bn1(self.conv1(x)))
+                out = self.relu(self.bn2(self.conv2(out)))
+                out = self.bn3(self.conv3(out))
+                if self.downsample is not None:
+                    identity = self.downsample(x)
+                return self.relu(out + identity)
+
+        def make_layer(in_ch, mid_ch, blocks, stride=1):
+            downsample = torch.nn.Sequential(
+                torch.nn.Conv2d(in_ch, mid_ch * 4, 1, stride=stride, bias=False),
+                torch.nn.BatchNorm2d(mid_ch * 4),
+            )
+            layers = [Bottleneck(in_ch, mid_ch, stride, downsample)]
+            for _ in range(1, blocks):
+                layers.append(Bottleneck(mid_ch * 4, mid_ch))
+            return torch.nn.Sequential(*layers)
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv1 = torch.nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False)
+                self.bn1 = torch.nn.BatchNorm2d(64)
+                self.relu = torch.nn.ReLU(inplace=True)
+                self.maxpool = torch.nn.MaxPool2d(3, stride=2, padding=1)
+                self.layer1 = make_layer(64, 128, blocks=3)
+                self.layer2 = make_layer(512, 256, blocks=4, stride=2)
+                self.layer3 = make_layer(1024, 512, blocks=20, stride=2)
+                self.avgpool = torch.nn.AdaptiveAvgPool2d(1)
+                self.fc = torch.nn.Linear(2048, 1000)
+
+            def forward(self, x):
+                x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+                x = self.layer1(x)
+                x = self.layer2(x)
+                x = self.layer3(x)
+                return self.fc(self.avgpool(x).flatten(1))
+
+        return Model()
+
+    @staticmethod
+    def _try_combo_with_fake_scheduler(
+        nodes,
+        group_nodes,
+        *,
+        buf_info_list,
+        baseline_peak,
+        thresholds,
+    ):
+        from torch._inductor.scheduler import ComboKernelMemoryContext, Scheduler
+
+        scheduler = _PeakMemFakeScheduler(nodes)
+        mem_ctx = ComboKernelMemoryContext(
+            graph_outputs=set(),
+            buf_info_list=buf_info_list,
+            freeable_input_buffer_cls=_PeakMemFakeFreeableInputBuffer,
+            node_to_idx={node: idx for idx, node in enumerate(nodes)},
+            baseline_peak=baseline_peak,
+        )
+
+        with (
+            patch(
+                "torch._inductor.scheduler.ForeachKernelSchedulerNode",
+                lambda *a, **kw: _PeakMemFakeNode("combo"),
+            ),
+            torch._inductor.config.patch(**thresholds),
+        ):
+            return Scheduler._try_combo_with_memory_check(
+                scheduler,
+                group_nodes,
+                mem_ctx,
+                baseline_peak=baseline_peak,
+                enable_autotune=False,
+            )
+
+    def test_threshold_gating(self):
+        """abs_thr/pct_thr set to 0 or a too-small bound reject; default accepts."""
+        a = _PeakMemFakeNode("a")
+        consume_a = _PeakMemFakeNode("consume_a", deps=("buf_a",))
+        b = _PeakMemFakeNode("b")
+        consume_b = _PeakMemFakeNode("consume_b", deps=("buf_b",))
+        nodes = [a, consume_a, b, consume_b]
+        buf_info_list = [
+            BufferInfo(_PeakMemFakeBuffer("buf_a", a, {consume_a}), 100, 100, 0, 1),
+            BufferInfo(_PeakMemFakeBuffer("buf_b", b, {consume_b}), 100, 100, 2, 3),
+        ]
+
+        def run(thresholds):
+            return self._try_combo_with_fake_scheduler(
+                nodes,
+                [a, b],
+                buf_info_list=buf_info_list,
+                baseline_peak=100,
+                thresholds=thresholds,
+            )
+
+        # Rejection cases: any limit below the +100 delta the combo forces.
+        for label, thresholds in (
+            ("abs=0", self._thresholds(abs_thr=0)),
+            ("pct=0", self._thresholds(pct_thr=0.0)),
+            ("abs=1", self._thresholds(abs_thr=1)),
+        ):
+            combo, _, _ = run(thresholds)
+            self.assertIsNone(combo, f"{label} should reject")
+
+        # Both thresholds disabled → accept; combo lands at step 0.
+        combo, _, combo_step = run(self._thresholds())
+        self.assertIsNotNone(combo)
+        self.assertEqual(combo_step, 0)
+
+    @requires_gpu_and_triton
+    def test_combo_kernel_peak_memory_wide_resnet(self):
+        """A tight peak-memory threshold must measurably reduce the
+        runtime CUDA peak memory of the compiled forward pass compared
+        to the gating-disabled baseline. Both runs pin
+        combo_kernel_max_distance so the windowing behavior is identical
+        and the only difference is whether the gate rejects oversized
+        combos."""
+        model = ComboKernelPeakMemoryTests._make_wide_resnet_like().to(GPU_TYPE).eval()
+        x = torch.randn(1, 3, 224, 224, device=GPU_TYPE)
+        with torch.no_grad():
+            out_eager = model(x)
+
+        def compile_and_measure_peak(**cfg):
+            torch._dynamo.reset()
+            torch._inductor.metrics.reset()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            with (
+                fresh_cache(),
+                torch._inductor.config.patch(
+                    **cfg,
+                ),
+            ):
+                with torch.no_grad():
+                    out = torch.compile(model)(x)
+                torch.cuda.synchronize()
+            self.assertEqual(out_eager, out)
+            return torch.cuda.max_memory_allocated()
+
+        # Gating disabled: combos can co-allocate freely → higher peak.
+        peak_disabled = compile_and_measure_peak(
+            **self._thresholds(abs_thr=None, pct_thr=None, max_distance=-1),
+        )
+        # Tight abs threshold: reject combos that would inflate peak.
+        peak_tight = compile_and_measure_peak(
+            **self._thresholds(abs_thr=1 << 20, max_distance=32),
+        )
+        self.assertLess(
+            peak_tight,
+            peak_disabled,
+            f"tight threshold did not reduce runtime peak memory "
+            f"(tight={peak_tight}, disabled={peak_disabled})",
+        )
 
 
 if __name__ == "__main__":

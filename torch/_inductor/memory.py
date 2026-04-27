@@ -432,6 +432,31 @@ def compute_memory_timeline(
     return buf_info_list, node_to_step, buf_to_snode_last_use
 
 
+def peak_memory_from_buf_info_list(
+    buf_info_list: list[BufferInfo], num_steps: int
+) -> tuple[int, list[int]]:
+    """Compute peak and per-step live memory from buffer lifetimes.
+
+    Skip the free for graph-output buffers (`end_step == -1`); otherwise
+    `delta[0] -= size_free` would cancel the alloc.
+    """
+    delta = [0] * (num_steps + 1)
+    for bi in buf_info_list:
+        delta[bi.start_step] += bi.size_alloc
+        if bi.end_step != -1:
+            delta[bi.end_step + 1] -= bi.size_free
+
+    max_memory = 0
+    cur_memory = 0
+    memories_at_nodes = [0] * (num_steps + 1)
+    for t in range(num_steps + 1):
+        cur_memory += delta[t]
+        memories_at_nodes[t] = cur_memory
+        if cur_memory > max_memory:
+            max_memory = cur_memory
+    return max_memory, memories_at_nodes
+
+
 def estimate_peak_memory(
     nodes: list[BaseSchedulerNode],
     name_to_freeable_input_buf: dict[str, FreeableInputBuffer],
@@ -445,29 +470,85 @@ def estimate_peak_memory(
         int: peak memory
         List[int]: memory usage at each node (or each step).
     """
-
     buf_info_list, _, _ = compute_memory_timeline(
         nodes, name_to_freeable_input_buf, graph_outputs
     )
+    return peak_memory_from_buf_info_list(buf_info_list, len(nodes))
 
-    # incremental memory changes at each step
-    memory = [0 for _ in range(len(nodes) + 1)]
 
-    # for each buffer, update memory when created and when freed
-    for buf_info in buf_info_list:
-        memory[buf_info.start_step] += buf_info.size_alloc
-        memory[buf_info.end_step + 1] -= buf_info.size_free
+def estimate_region_peak_memory(
+    buf_info_list: list[BufferInfo],
+    *,
+    region_start: int,
+    region_end: int,
+    step_of: Callable[[BaseSchedulerNode], int],
+    graph_outputs: OrderedSet[str],
+    freeable_input_buffer_cls: type,
+) -> int:
+    """Peak memory inside `[region_start, region_end]` for the
+    hypothetical post-reorder schedule. `step_of(node)` returns the
+    node's step in the proposed order, or -1 if not located.
 
-    # get peak memory by compute the cumulative memories
-    max_memory = 0
-    cur_memory = 0
-    memories_at_nodes = []
-    for t in range(len(nodes) + 1):
-        cur_memory += memory[t]
-        memories_at_nodes.append(cur_memory)
-        max_memory = max(max_memory, cur_memory)
+    Three special cases:
+    * Graph outputs (`end_step == -1`): never freed.
+    * Buffers whose defining op runs past the region: ignored locally
+      (alloc/free happen elsewhere).
+    * Freeable inputs: alive from step 0; only their last consumer
+      can move under a reorder.
+    """
+    region_delta = [0] * (region_end - region_start + 2)
+    carry_in = 0
 
-    return (max_memory, memories_at_nodes)
+    for bi in buf_info_list:
+        buf = bi.buffer
+
+        if isinstance(buf, freeable_input_buffer_cls):
+            new_start = 0
+            if buf.get_name() in graph_outputs:
+                new_end = -1
+            else:
+                succ = [
+                    s for s in (step_of(n) for n in buf.mpi_buffer.succ_nodes) if s >= 0
+                ]
+                if not succ:
+                    continue
+                new_end = max(succ)
+        else:
+            defining = buf.defining_op  # type: ignore[union-attr]
+            if defining is None:
+                continue
+            new_start = step_of(defining)
+            if new_start < 0 or new_start > region_end:
+                continue
+            if buf.get_name() in graph_outputs:
+                new_end = -1
+            else:
+                succ = [
+                    s for s in (step_of(n) for n in buf.mpi_buffer.succ_nodes) if s >= 0
+                ]
+                new_end = max(succ) if succ else new_start
+
+        # `region_start - 1` (not `region_start`): a buffer freed at
+        # `region_start` lands its subtract in region_delta[0], so its
+        # alloc must be in carry_in too.
+        if new_start < region_start and (new_end == -1 or new_end >= region_start - 1):
+            carry_in += bi.size_alloc
+
+        if region_start <= new_start <= region_end:
+            region_delta[new_start - region_start] += bi.size_alloc
+        if new_end >= 0:
+            free_slot = new_end + 1
+            if region_start <= free_slot <= region_end + 1:
+                region_delta[free_slot - region_start] -= bi.size_free
+
+    # peak starts at 0, not carry_in: carry_in is at region_start - 1, outside the window.
+    cur = carry_in
+    peak = 0
+    for d in region_delta:
+        cur += d
+        if cur > peak:
+            peak = cur
+    return peak
 
 
 @dataclasses.dataclass

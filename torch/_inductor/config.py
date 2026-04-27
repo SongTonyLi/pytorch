@@ -1023,6 +1023,19 @@ combo_kernel_per_subkernel_blocks = False
 combo_kernel_autotune_grouping = False
 # When True, only pointwise kernels are eligible for combo kernel fusion.
 combo_kernels_pointwise_only = False
+# Memory-aware combo kernel gating.
+#   None: disable that threshold dimension
+#   0: allow no graph-peak increase
+#   value: allow peak delta up to that limit for one combo attempt
+# The accepted delta is measured against the current graph peak after earlier
+# accepted combos. When both thresholds are set, the tighter limit wins.
+combo_kernel_peak_memory_threshold: int | None = 512 << 20
+combo_kernel_peak_memory_pct_threshold: float | None = 0.05
+# Maximum baseline-index span of a single combo candidate. Groups whose
+# first-to-last baseline-index distance exceeds this are split into
+# sub-windows. Set to -1 (or any negative value) to disable splitting
+# and treat each parallel group as one window.
+combo_kernel_max_distance: int = -1
 
 # constant folding on the joint graph
 joint_graph_constant_folding = True
