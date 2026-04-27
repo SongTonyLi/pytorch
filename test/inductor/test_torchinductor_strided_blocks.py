@@ -131,18 +131,31 @@ def _fails_tma_check(
     return False
 
 
-def _pointwise_subtest(full_size, view_size, stride=None, offset=None, require_block_ptr=True, extra_decorators=None):
+def _pointwise_subtest(
+    full_size,
+    view_size,
+    stride=None,
+    offset=None,
+    require_block_ptr=True,
+    extra_decorators=None,
+):
     args = (full_size, view_size, stride, offset, require_block_ptr)
     decorators = list(extra_decorators or [])
-    if require_block_ptr and _fails_tma_check(view_size, strides=stride, full_size=full_size):
+    if require_block_ptr and _fails_tma_check(
+        view_size, strides=stride, full_size=full_size
+    ):
         decorators += [xfail_if_use_tensor_descriptor]
     return subtest(arg_values=args, decorators=decorators)
 
 
-def _reduction_subtest(view_size, num_block_pointers, num_triton_kernels, extra_decorators=None):
+def _reduction_subtest(
+    view_size, num_block_pointers, num_triton_kernels, extra_decorators=None
+):
     args = (view_size, num_block_pointers, num_triton_kernels)
     decorators = list(extra_decorators or [])
-    if num_block_pointers is not None and _fails_tma_check(view_size, discontiguous=True):
+    if num_block_pointers is not None and _fails_tma_check(
+        view_size, discontiguous=True
+    ):
         decorators += [xfail_if_use_tensor_descriptor]
     return subtest(arg_values=args, decorators=decorators)
 
@@ -298,8 +311,12 @@ class CommonTemplate:
             _pointwise_subtest((8, 8), (4, 4), stride=(16, 2)),  # Non-default strides
             _pointwise_subtest((8, 8), (4, 4), stride=(1, 8)),  # Transposed strides
             _pointwise_subtest((5, 9), (5, 8)),  # Non-power-of-2 leading dim: block ptr
-            _pointwise_subtest((15, 9), (15, 3), require_block_ptr=False),  # Non-power-of-2 inner dims: non-block ptr
-            _pointwise_subtest((1, 1, 1), (1, 1, 1), require_block_ptr=False),  # Scalar: non-block ptr
+            _pointwise_subtest(
+                (15, 9), (15, 3), require_block_ptr=False
+            ),  # Non-power-of-2 inner dims: non-block ptr
+            _pointwise_subtest(
+                (1, 1, 1), (1, 1, 1), require_block_ptr=False
+            ),  # Scalar: non-block ptr
             _pointwise_subtest(
                 (2, 4 * max_block),
                 (2, 3 * max_block),
@@ -352,8 +369,12 @@ class CommonTemplate:
         [
             _broadcast_subtest((8, 8), (8, 1)),
             _broadcast_subtest((8, 8), (1, 8)),
-            _broadcast_subtest((4, 1, 4), (1, 4, 1)),  # Very important case: index variables are disjoint!
-            _broadcast_subtest((1, 1, 1, 4), (4, 4, 4, 4)),  # Unmatched dims for first operand.
+            _broadcast_subtest(
+                (4, 1, 4), (1, 4, 1)
+            ),  # Very important case: index variables are disjoint!
+            _broadcast_subtest(
+                (1, 1, 1, 4), (4, 4, 4, 4)
+            ),  # Unmatched dims for first operand.
         ],
     )
     def test_broadcast(
@@ -565,10 +586,16 @@ class CommonTemplate:
             _reduction_subtest((8, 8, 8), 1, 1),
             _reduction_subtest((15, 15), None, 1),  # Non-power of 2
             _reduction_subtest(  # Multiple of max block. Uses loops.
-                (3 * max_block, 2), 3, 2,
-                extra_decorators=[test_torchinductor.skip_if_triton_cpu("Triton CPU: slow test")],
+                (3 * max_block, 2),
+                3,
+                2,
+                extra_decorators=[
+                    test_torchinductor.skip_if_triton_cpu("Triton CPU: slow test")
+                ],
             ),
-            _reduction_subtest((2, 3 * max_block), 2, 2),  # Multiple of max block. Uses loops.
+            _reduction_subtest(
+                (2, 3 * max_block), 2, 2
+            ),  # Multiple of max block. Uses loops.
             # 2-kernel split xfails TMA; on SM100+ uses single persistent kernel and passes.
             subtest(
                 arg_values=((128, 128), 3, 2),
