@@ -110,6 +110,7 @@ ignore-missing-imports = [
     "onnxruntime.*",
     "onnxscript.*",
     "redis.*",
+    "origami.*",
 ]
 # By default, mypy does not check untyped definitions.
 # However, mypy has a configuration called check_untyped_defs which is used

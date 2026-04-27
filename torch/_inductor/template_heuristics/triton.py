@@ -1554,6 +1554,7 @@ class ROCmConfigHeuristic(BaseConfigHeuristic):
         # Architecture-aware default kpack for flex configs
         default_kpack = get_default_kpack()
 
+
         self.gfx950_default_flex_config = {
             (torch.float32, 64): ROCmFlexConfig(128, 32, 1, 4, kpack=default_kpack),
             (torch.float32, 128): ROCmFlexConfig(128, 32, 1, 4, kpack=default_kpack),
@@ -2058,27 +2059,106 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
 
         # Extract dtype and device_type from kernel_inputs
         dtype = kernel_inputs.dtype()
-
+        device = kernel_inputs.device()
+        strides = kernel_inputs.strides_symbolic()
+        a_stride = strides[kernel_inputs._mat1_idx]
+        b_stride = strides[kernel_inputs._mat2_idx]
+        out_layout = kernel_inputs.output_layout(flexible=False)  # noqa: F841
         # Get the appropriate config generator
         configs = self._get_config_generator()
-
         # Generate and process configs
-        for c in configs(
-            m,
-            n,
-            k,
-            dtype_size=dtype.itemsize,
-            op_name=op_name,
-            **kwargs,
+        if (
+            (torch.version.hip is not None)
+            and config.rocm.origami
+            and config.max_autotune_gemm_search_space == "DEFAULT"
         ):
-            template_kwargs = self._convert_config_to_template_kwargs(
-                c,
+            try:
+                import origami
+            except ImportError:
+                raise ImportError("Origami not imported") from None
+
+            origami_cfg_gen = self.get_exhaustive_mm_configs()
+            allcfgs = origami_cfg_gen(
+                m, n, k, dtype_size=dtype.itemsize, op_name=op_name
+            )
+            selector = origami.OrigamiMatmulSelector(
+                allcfgs,
                 m,
                 n,
                 k,
-                kernel_inputs.out_dtype(),
+                dtype,
+                dtype,
+                dtype,
+                device,
+                a_stride,
+                b_stride,
             )
-            yield template_kwargs
+            topk_results = origami.select_topk_configs(
+                selector._problem,
+                selector._hardware,
+                selector._configs,
+                config.rocm.origami_topk,
+            )
+            seen = OrderedSet()
+            for result in topk_results:
+                cfg = result.config
+                key = (cfg.mt.m, cfg.mt.n, cfg.mt.k, cfg.occupancy)
+                if key in seen:
+                    continue
+                seen.add(key)
+                grid = origami.select_grid_size(
+                    selector._problem,
+                    selector._hardware,
+                    cfg,
+                    origami.grid_selection_t.data_parallel,
+                    selector._hardware.N_CU,
+                )
+                wgm_result = origami.select_workgroup_mapping(
+                    selector._problem,
+                    selector._hardware,
+                    cfg,
+                    grid,
+                )
+                tile_area = cfg.mt.m * cfg.mt.n
+                warp_size = torch.cuda.get_device_properties(device).warp_size
+                mfma_dim = 16
+                max_warps = 2 * selector._hardware.parallel_mi_cu
+                num_warps = min(
+                    max_warps,
+                    max(1, tile_area // (mfma_dim * warp_size)),
+                )
+                yield {
+                    "EVEN_K": math.gcd(k, cfg.mt.k) == cfg.mt.k,
+                    "USE_FAST_ACCUM": False,
+                    "ACC_TYPE": "tl.float32",
+                    "OUT_DTYPE": self._get_out_dtype(kernel_inputs.out_dtype()),
+                    "num_stages": 2,
+                    "num_warps": num_warps,
+                    "BLOCK_M": cfg.mt.m,
+                    "BLOCK_N": cfg.mt.n,
+                    "BLOCK_K": cfg.mt.k,
+                    "GROUP_M": wgm_result.wgm,
+                    "matrix_instr_nonkdim": 16,
+                    "waves_per_eu": cfg.occupancy,
+                    "kpack": 2,
+                }
+        else:
+            for c in configs(
+                m,
+                n,
+                k,
+                dtype_size=dtype.itemsize,
+                op_name=op_name,
+                **kwargs,
+            ):
+                template_kwargs = self._convert_config_to_template_kwargs(
+                    c,
+                    m,
+                    n,
+                    k,
+                    kernel_inputs.out_dtype(),
+                )
+                yield template_kwargs
 
     def _convert_config_to_template_kwargs(
         self,
@@ -2901,6 +2981,7 @@ class ROCmScaledMMTemplateConfigHeuristic(ScaledMMConfigMixin, ROCmConfigHeurist
         super().__init__()
         # Override mm_configs to use scaled_mm_configs
         self.mm_configs = self.scaled_mm_configs
+        self.exhaustive_origami_configs = self.scaled_mm_configs
 
     def _filter_configs(self, configs: list[BaseConfig]) -> list[BaseConfig]:
         configs = [c for c in configs if c.block_k >= 32]
